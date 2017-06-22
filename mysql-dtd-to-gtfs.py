@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-import os, sys, contextlib, logging, pathlib
+import os, sys, contextlib, logging, pathlib, collections
 
-import MySQLdb # https://mysqlclient.readthedocs.io/
+import MySQLdb, MySQLdb.cursors # https://mysqlclient.readthedocs.io/
 
 
 class LogMessage(object):
@@ -22,25 +22,99 @@ class LogStyleAdapter(logging.LoggerAdapter):
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 
 
+class DBCursor(MySQLdb.cursors.Cursor):
+	'Returns named tuples for specified list of fields without any introspection.'
+
+	@classmethod
+	@ft.lru_cache(maxsize=128)
+	def for_fields(cls, fields):
+		return ft.partial(cls,
+			(lambda *a: tuple(a)) if isinstance(fields, str) else
+			collections.namedtuple(f'Row', fields, rename=True) )
+
+	def __init__(self, tuple_type, *args, **kws):
+		self._tt = tuple_type
+		super().__init__(*args, **kws)
+
+	def fetchone(self):
+		for row in super().fetchone(): yield self._tt(*row)
+	def fetchmany(self, size=None):
+		for row in super().fetchmany(size=size): yield self._tt(*row)
+	def fetchall(self):
+		for row in super().fetchall(): yield self._tt(*row)
+
+
 class DTDtoGTFS:
 
+	# Forces errors on truncated values and issues in multi-row inserts
+	sql_mode = 'strict_all_tables'
+
 	def __init__(self, db_cif, db_gtfs, conn_opts_base):
-		self.db_names, self.conn_opts_base = [db_cif, db_gtfs], conn_opts_base
+		self.db_cif, self.db_gtfs, self.conn_opts_base = db_cif, db_gtfs, conn_opts_base
+		self.log = get_logger('dtd2gtfs')
 
 	def __enter__(self):
-		db_src, db_dst = self.db_names
-		self._ctx = contextlib.ExitStack()
-		# conv [types] - MySQLdb.converters.conversions
-		# cursors: DictCursor SSDictCursor (server-side)
-		self.db_cif, self.db_gtfs = (
-			self._ctx.enter_context(MySQLdb.connect(db=db, **self.conn_opts_base))
-			for db in self.db_names )
+		self.db = MySQLdb.connect(**self.conn_opts_base)
+		with self.db.cursor() as cur:
+			cur.execute('show variables like %s', ['sql_mode'])
+			mode_flags = set(map(str.strip, dict(cur.fetchall())['sql_mode'].lower().split(',')))
+			mode_flags.update(self.sql_mode.lower().split())
+			cur.execute('set sql_mode = %s', [','.join(mode_flags)])
 		return self
 
 	def __exit__(self, *exc):
-		self._ctx.close()
+		if self.db: self.db = self.db.close()
 
-	def run(self): pass
+
+	## Simple query builder
+
+	def q_raw(self, q, *params, ct=None):
+		with self.db.cursor(ct) as cur:
+			self.log.debug('sql-raw: {!r} {}', q, params or None)
+			cur.execute(q, params)
+			return list(cur.fetchall())
+
+	def q( self,
+			table, fields='*', raw_filter=None, ext=None,
+			col=None, v=None, chk='=', to=None, cursor=False ):
+		params, cursor_type = list(), None
+		if not isinstance(fields, str):
+			fields, cursor_type = ', '.join(fields), \
+				DBCursor.for_fields(tuple(f.split()[-1] for f in fields))
+		if not raw_filter and col:
+			raw_filter = f'where {col} {chk} %s'
+			params.append(v)
+		raw_filter, ext = raw_filter or '', ext or ''
+		with self.db.cursor(cursor_type) as cur:
+			q = f'select {fields} from {self.db_cif}.{table} {raw_filter} {ext}'
+			if to: q = f'insert into {self.db_gtfs}.{to} {q}'
+			self.log.debug('sql: {!r} {}', q, params)
+			cur.execute(q, params)
+			if cursor: yield cur
+			elif to: return
+			else:
+				for row in cur.fetchall(): yield row
+
+	@contextlib.contextmanager
+	def qc(self, *args, **kws):
+		query = self.q(*args, cursor=True, **kws)
+		yield next(query)
+		next(query)
+
+	def qe(self, *args, **kws):
+		query = self.q(*args, cursor=True, **kws)
+		return next(query)
+
+
+	## Conversion routine
+
+	def run(self):
+		self.qe('fixed_link', 'null, origin, destination, 2, duration * 60', to='transfers')
+		with self.qc('schedule', ['id', 'train_uid']) as c:
+			print(c.rowcount)
+		for row in self.q('schedule', ['id', 'train_uid'], ext='limit 1'):
+			print(row)
+			break
 
 
 def main(args=None):
