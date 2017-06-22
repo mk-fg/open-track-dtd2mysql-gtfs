@@ -23,25 +23,35 @@ get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 
 
 class DBCursor(MySQLdb.cursors.Cursor):
-	'Returns named tuples for specified list of fields without any introspection.'
+	'Returns namedtuple for each row.'
+
+	@staticmethod
+	@ft.lru_cache(maxsize=128)
+	def tuple_for_row(row):
+		if isinstance(row, str): return lambda *a: tuple(a)
+		row = list(k.replace('.', ' ').rsplit(None, 1)[-1] for k in row)
+		return collections.namedtuple(f'Row', row, rename=True)
 
 	@classmethod
-	@ft.lru_cache(maxsize=128)
-	def for_fields(cls, fields):
-		return ft.partial(cls,
-			(lambda *a: tuple(a)) if isinstance(fields, str) else
-			collections.namedtuple(f'Row', fields, rename=True) )
+	def with_keys(cls, row):
+		return ft.partial(cls, tuple_type=cls.tuple_for_row(row))
 
-	def __init__(self, tuple_type, *args, **kws):
+	def __init__(self, *args, tuple_type=None, **kws):
 		self._tt = tuple_type
+		self._fetch_type = 1 if self._tt else 2
 		super().__init__(*args, **kws)
 
+	def _row(self, row):
+		if row is None: return
+		return ( self._tt(*row) if self._tt else
+			self.tuple_for_row(tuple(row.keys()))(*row.values()) )
+
 	def fetchone(self):
-		for row in super().fetchone(): yield self._tt(*row)
+		return self._row(super().fetchone())
 	def fetchmany(self, size=None):
-		for row in super().fetchmany(size=size): yield self._tt(*row)
+		for row in super().fetchmany(size=size): yield self._row(row)
 	def fetchall(self):
-		for row in super().fetchall(): yield self._tt(*row)
+		for row in super().fetchall(): yield self._row(row)
 
 
 class DTDtoGTFS:
@@ -75,18 +85,17 @@ class DTDtoGTFS:
 			return list(cur.fetchall())
 
 	def q( self,
-			table, fields='*', raw_filter=None, ext=None,
+			table, row='*', where=None, ext=None,
 			col=None, v=None, chk='=', to=None, cursor=False ):
-		params, cursor_type = list(), None
-		if not isinstance(fields, str):
-			fields, cursor_type = ', '.join(fields), \
-				DBCursor.for_fields(tuple(f.split()[-1] for f in fields))
-		if not raw_filter and col:
-			raw_filter = f'where {col} {chk} %s'
+		params, cursor_type = list(), DBCursor
+		if not isinstance(row, str):
+			row, cursor_type = ', '.join(row), DBCursor.with_keys(row)
+		if not where and col:
+			where = f'{col} {chk} %s'
 			params.append(v)
-		raw_filter, ext = raw_filter or '', ext or ''
+		where, ext = f'where {where}' if where else '', ext or ''
 		with self.db.cursor(cursor_type) as cur:
-			q = f'select {fields} from {self.db_cif}.{table} {raw_filter} {ext}'
+			q = f'select {row} from {self.db_cif}.{table} {where} {ext}'
 			if to: q = f'insert into {self.db_gtfs}.{to} {q}'
 			self.log.debug('sql: {!r} {}', q, params)
 			cur.execute(q, params)
@@ -109,12 +118,19 @@ class DTDtoGTFS:
 	## Conversion routine
 
 	def run(self):
-		self.qe('fixed_link', 'null, origin, destination, 2, duration * 60', to='transfers')
-		with self.qc('schedule', ['id', 'train_uid']) as c:
-			print(c.rowcount)
-		for row in self.q('schedule', ['id', 'train_uid'], ext='limit 1'):
-			print(row)
-			break
+		# Stops
+		self.qe( 'tiploc', to='stops',
+			row='null, crs_code, tiploc_code, description,'
+				' description, null, null, null, null, 0, null, "Europe/London", 0',
+			where='crs_code is not null and description is not null' )
+
+		# Transfers
+		self.qe( 'fixed_link', to='transfers',
+			row='null, origin, destination, 2, duration * 60')
+		self.qe( 'physical_station', to='transfers',
+			row='null, crs_code, crs_code, 2, minimum_change_time * 60')
+
+		for schedule in self.q('schedule', ext='limit 1'): pass
 
 
 def main(args=None):
