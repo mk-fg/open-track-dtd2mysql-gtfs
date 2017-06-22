@@ -2,6 +2,7 @@
 
 import itertools as it, operator as op, functools as ft
 import os, sys, contextlib, logging, pathlib, collections
+import calendar, locale
 
 import MySQLdb, MySQLdb.cursors # https://mysqlclient.readthedocs.io/
 
@@ -22,7 +23,7 @@ class LogStyleAdapter(logging.LoggerAdapter):
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 
 
-class DBCursor(MySQLdb.cursors.Cursor):
+class NTCursor(MySQLdb.cursors.Cursor):
 	'Returns namedtuple for each row.'
 
 	@staticmethod
@@ -61,10 +62,17 @@ class DTDtoGTFS:
 
 	def __init__(self, db_cif, db_gtfs, conn_opts_base):
 		self.db_cif, self.db_gtfs, self.conn_opts_base = db_cif, db_gtfs, conn_opts_base
-		self.log = get_logger('dtd2gtfs')
+		self.log, self.log_sql = get_logger('dtd2gtfs'), get_logger('dtd2gtfs.sql')
 
 	def __enter__(self):
-		self.db = MySQLdb.connect(**self.conn_opts_base)
+		self.ctx = contextlib.ExitStack()
+
+		# Reset locale for consistency in calendar and such
+		locale_prev = locale.setlocale(locale.LC_ALL, '')
+		self.ctx.callback(locale.setlocale, locale.LC_ALL, locale_prev)
+
+		self.db = self.ctx.enter_context(
+			contextlib.closing(MySQLdb.connect(charset='utf8mb4', **self.conn_opts_base)) )
 		with self.db.cursor() as cur:
 			cur.execute('show variables like %s', ['sql_mode'])
 			mode_flags = set(map(str.strip, dict(cur.fetchall())['sql_mode'].lower().split(',')))
@@ -73,64 +81,63 @@ class DTDtoGTFS:
 		return self
 
 	def __exit__(self, *exc):
-		if self.db: self.db = self.db.close()
-
-
-	## Simple query builder
-
-	def q_raw(self, q, *params, ct=None):
-		with self.db.cursor(ct) as cur:
-			self.log.debug('sql-raw: {!r} {}', q, params or None)
-			cur.execute(q, params)
-			return list(cur.fetchall())
-
-	def q( self,
-			table, row='*', where=None, ext=None,
-			col=None, v=None, chk='=', to=None, cursor=False ):
-		params, cursor_type = list(), DBCursor
-		if not isinstance(row, str):
-			row, cursor_type = ', '.join(row), DBCursor.with_keys(row)
-		if not where and col:
-			where = f'{col} {chk} %s'
-			params.append(v)
-		where, ext = f'where {where}' if where else '', ext or ''
-		with self.db.cursor(cursor_type) as cur:
-			q = f'select {row} from {self.db_cif}.{table} {where} {ext}'
-			if to: q = f'insert into {self.db_gtfs}.{to} {q}'
-			self.log.debug('sql: {!r} {}', q, params)
-			cur.execute(q, params)
-			if cursor: yield cur
-			elif to: return
-			else:
-				for row in cur.fetchall(): yield row
-
-	@contextlib.contextmanager
-	def qc(self, *args, **kws):
-		query = self.q(*args, cursor=True, **kws)
-		yield next(query)
-		next(query)
-
-	def qe(self, *args, **kws):
-		query = self.q(*args, cursor=True, **kws)
-		return next(query)
+		if self.ctx: self.ctx = self.ctx.close()
 
 
 	## Conversion routine
 
+	def q(self, q, *params):
+		with self.db.cursor(NTCursor) as cur:
+			if self.log_sql.isEnabledFor(logging.DEBUG):
+				p_log = str(params)
+				if len(p_log) > 150: p_log = f'{p_log[:150]}...[len={len(p_log)}]'
+				self.log_sql.debug('{!r} {}', ' '.join(q.split()), p_log)
+			cur.execute(q, params)
+			return cur.fetchall()
+
+	def insert(self, table, **row):
+		row = collections.OrderedDict(row.items())
+		cols, vals = ','.join(row.keys()), ','.join(['%s']*len(row))
+		self.q(f'INSERT INTO {table} ({cols}) VALUES ({vals})', *row.values())
+
 	def run(self):
-		# Stops
-		self.qe( 'tiploc', to='stops',
-			row='null, crs_code, tiploc_code, description,'
-				' description, null, null, null, null, 0, null, "Europe/London", 0',
-			where='crs_code is not null and description is not null' )
+		q, insert = self.q, self.insert
 
-		# Transfers
-		self.qe( 'fixed_link', to='transfers',
-			row='null, origin, destination, 2, duration * 60')
-		self.qe( 'physical_station', to='transfers',
-			row='null, crs_code, crs_code, 2, minimum_change_time * 60')
+		### Stops
+		q('''
+			INSERT INTO gtfs.stops
+					SELECT
+						null, crs_code, tiploc_code, description, description,
+						null, null, null, null, 0, null, "Europe/London", 0
+					FROM cif.tiploc WHERE crs_code IS NOT NULL AND description IS NOT NULL;''')
 
-		for schedule in self.q('schedule', ext='limit 1'): pass
+		### Transfers
+		# TODO: better data source / convert to trip+frequences? Losing the mode here, TUBE, WALK, etc
+		q('''
+			INSERT INTO gtfs.transfers
+				SELECT null, origin, destination, 2, duration * 60
+				FROM cif.fixed_link;''')
+		# This is interchange time
+		q('''
+			INSERT INTO gtfs.transfers
+				SELECT null, crs_code, crs_code, 2, minimum_change_time * 60
+				FROM cif.physical_station;''')
+
+		for s in q('''
+				SELECT *
+				FROM cif.schedule
+				LEFT JOIN cif.schedule_extra e ON e.schedule = schedule.id'''):
+
+			### Calendar dates
+			insert( 'gtfs.calendar',
+				service_id=s.id, start_date=s.runs_from, end_date=s.runs_to,
+				**dict((k.lower(), getattr(s, k.lower())) for k in calendar.day_name) )
+
+			### Trips
+			# XXX: fill in more metadata here
+			insert( 'gtfs.trips',
+				route_id='XXX', service_id=s.id, trip_id=s.id,
+				trip_headsign=s.train_uid, trip_short_name=s.retail_train_id )
 
 
 def main(args=None):
@@ -168,7 +175,7 @@ def main(args=None):
 	log = get_logger('main')
 
 	# Useful stuff for ~/.my.cnf: host port user passwd connect_timeout
-	mysql_conn_opts = dict(filter(op.itemgetter(1), dict( charset='utf8mb4',
+	mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
 		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
 	with DTDtoGTFS(opts.src_cif_db, opts.dst_gtfs_db, mysql_conn_opts) as conv: conv.run()
 
