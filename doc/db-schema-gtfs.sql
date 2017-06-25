@@ -1,3 +1,11 @@
+
+
+-- --------------------
+-- Notes:
+--  - trips.txt is missing bikes_allowed field.
+--  - All tables are missing db consistency constraints (e.g. foreign keys).
+
+
 -- MySQL dump 10.16  Distrib 10.1.24-MariaDB, for Linux (x86_64)
 --
 -- Host: 10.0.10.2    Database: gtfs

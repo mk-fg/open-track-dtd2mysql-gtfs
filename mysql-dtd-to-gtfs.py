@@ -61,8 +61,13 @@ class CIFError(ConversionError): pass
 
 
 GTFSRouteType = enum.IntEnum( 'RouteType',
-	'light_rail subway rail bus ferry cable_car gondola funicular spacecraft' )
-GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver')
+	'light_rail subway rail bus ferry cable_car gondola funicular spacecraft', start=0 )
+GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0)
+GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
+
+
+class GTFSTimespanError(Exception): pass
+class GTFSTimespan: pass # XXX: implement
 
 
 class DTDtoGTFS:
@@ -111,7 +116,7 @@ class DTDtoGTFS:
 		return self.q( f'INSERT INTO'
 			f' {table} ({cols}) VALUES ({vals})', *row.values(), fetch=False )
 
-	def run(self):
+	def run(self, test_run_slice=None):
 		q, insert = self.q, self.insert
 
 
@@ -145,23 +150,54 @@ class DTDtoGTFS:
 				FROM cif.physical_station''')
 
 
-		### DTD Schedule/Service entries
-		# XXX: add processing of Z schedules here as well
-		# XXX: associations
+		### Process cif.schedule entries to gtfs.trips/gtfs.calendar/gtfs.calendar_dates
+		#
+		# Due to many-to-one relation between gtfs.trips and gtfs.calendar
+		#   (through service_id field), this is done in 3 sequential steps:
+		#  - populate gtfs.trips/gtfs.stop_times
+		#  - merge calendar timespans for trips where possible
+		#  - populate gtfs.calendar/gtfs.calendar_dates, cloning trips/stops where necessary
+		#
+		# So essentially converting many-to-many relation into many-to-one
+		#  with redundant trips, using service_span_trips as a temporary mtm index.
+		#
+		# XXX: processing of Z schedules
+		# XXX: processing of associations
+
+		service_span_trips = collections.defaultdict(set) # {svc_span: trip_id_set}
+
+
+		## Step-1: Add trips and stop_times for schedules
+		#
+		# - Only one gtfs.trip_id is created for same
+		#   trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
+		#
+		# - No calendar/service_id entries are created here -
+		#   these will be merged in Step-2 via service_span_trips,
+		#   and gtfs.trips will be updated with service_id values in Step-3,
+		#   duplicating gtfs.trip/gtfs.stop_times for timespans that can't be merged.
+
+		# This limit is for test-runs on small slices only
+		schedule_limit = '' if not test_run_slice else f'LIMIT {test_run_slice}'
 
 		route_ids = dict() # {(src, dst}: id}
-		for s in q('''
+		trip_merge_idx = dict() # {trip_hash: gtfs.trip_id}
+
+		# XXX: add progress tracking here
+		for s in q(f'''
 				SELECT *
 				FROM cif.schedule s
 				LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
-				ORDER BY s.id
-				LIMIT 100'''): # limit for testing only
+				ORDER BY s.train_uid, s.id {schedule_limit}'''):
 
 			# XXX: handle overrides later
 			if s.stp_indicator != 'P': continue
 
-
-			### Get route information and create Route, ignoring stop times for now
+			## Get stop sequence information and create gtfs.route_id, ignoring stop times for now
+			#
+			#  - cif.train_uid does not uniquely identify sequence of gtfs.stops (places),
+			#    even for stp_indicator=P schedules only, for example train_uid=W34606
+			#  - cif.schedule specifies both stop sequence and their days/times
 
 			stops = list(q('''
 				SELECT * FROM cif.stop_time st
@@ -172,10 +208,12 @@ class DTDtoGTFS:
 					public_arrival_time, scheduled_arrival_time,
 					public_departure_time, scheduled_departure_time''', s.id))
 			if not stops:
-				log.info('Skipping schedule with no usable stops: {}', s)
+				# XXX: there are quite a lot of these - check what these represent
+				# self.log.info('Skipping schedule with no usable stops: {}', s)
 				continue
 
 			# XXX: note on route_ids? - "how to do routes? get the toc in from schedule_extra"
+			# XXX: optimize - merge/split same as services
 			route_key = stops[0].id, stops[-1].id
 			if route_key in route_ids: route_id = route_ids[route_key]
 			else:
@@ -185,14 +223,19 @@ class DTDtoGTFS:
 						(stops[n].description.title() or stops[n].crs_code) for n in [0, -1] )),
 					route_type=int(GTFSRouteType.rail) )
 
+			## Trip and its stops
+			#
+			#  - Trips are considered equal (via trip_hash) for gtfs purposes
+			#    when it's same cif.train_uid and same stops at the same days/times.
+			#  - Again, it's not enough to just check train_uid, as schedules
+			#    with same cif.train_uid can have different gtfs.stop sequences.
 
-			### Trip
-			# XXX: fill in more metadata here
-			trip_id = insert( 'gtfs.trips',
-				route_id=route_id, service_id=s.id, trip_id=s.id,
-				trip_headsign=s.train_uid, trip_short_name=s.retail_train_id )
+			trip_hash, trip_stops = [s.train_uid], list()
+			svc_span = GTFSTimespan(
+				s.runs_from, s.runs_to, bank_holidays=bool(s.bank_holiday_running),
+				weekdays=dict((k.lower(), getattr(s, k.lower())) for k in calendar.day_name) )
 
-			### Trip stop times
+			## Process stop times
 			# XXX: time conversions - DTD->GTFS and late->next-day
 			for n, st in enumerate(stops, 1):
 
@@ -200,42 +243,43 @@ class DTDtoGTFS:
 				if public_stop:
 					pickup_type = GTFSPickupType.regular
 					ts_arr, ts_dep = st.public_arrival_time, st.public_departure_time
-					# XXX: check if origin has some arrival time indication in CIF data
-					ts_arr, ts_dep = ts_arr or ts_dep, ts_dep or ts_arr # origin/termination stops
 				else:
 					pickup_type = GTFSPickupType.none
 					ts_arr, ts_dep = st.scheduled_arrival_time, st.scheduled_departure_time
+				# XXX: check if origin has some arrival time indication in CIF data
+				ts_arr, ts_dep = ts_arr or ts_dep, ts_dep or ts_arr # origin/termination stops
 
-				insert( 'gtfs.stop_times',
-					trip_id=trip_id,
-					arrival_time=ts_arr, departure_time=ts_dep,
-					stop_id=st.stop_id, stop_sequence=n,
-					pickup_type=int(pickup_type) )
+				trip_stops.append((st, pickup_type, ts_arr, ts_dep))
+				trip_hash.append(( st.stop_id,
+					ts_arr and ts_arr.total_seconds(), ts_dep and ts_dep.total_seconds() ))
+
+			## Check if such gtfs.trip already exists and only needs gtfs.calendar entry
+			trip_hash = hash(tuple(trip_hash))
+			if trip_hash in trip_merge_idx: trip_id = trip_merge_idx[trip_hash]
+			else:
+				trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx)
+				# XXX: check if more trip/stop metadata can be filled-in here
+				insert( 'gtfs.trips',
+					trip_id=trip_id, route_id=route_id, service_id=s.id,
+					trip_headsign=s.train_uid, trip_short_name=s.retail_train_id )
+				for st, pickup_type, ts_arr, ts_dep in trip_stops:
+					insert( 'gtfs.stop_times',
+						trip_id=trip_id,
+						arrival_time=ts_arr, departure_time=ts_dep,
+						stop_id=st.stop_id, stop_sequence=n,
+						pickup_type=int(pickup_type) )
+			service_span_trips[svc_span].add(trip_id)
 
 
-			### Service Calendar dates
-			insert( 'gtfs.calendar',
-				service_id=s.id, start_date=s.runs_from, end_date=s.runs_to,
-				**dict((k.lower(), getattr(s, k.lower())) for k in calendar.day_name) )
+		## Step-2: merge/optimize timespans in service_span_trips where possible
+		# XXX: no optimizations implemented yet
 
-			# XXX: add gtfs.calendar date exceptions/overrides from cif.calendar
-			#
-			# find any other trip with the same train_uid
-			#  where this services dates are inside the other services dates
-			# SELECT * FROM calendar JOIN trips USING(service_id)
-			# WHERE
-			#  trip_headsign = schedule.train_uid
-			#  AND runs_from < schedule.runs_from AND runs_to > schedule.runs_to
-			# chop the runs_to of the original schedule to be the runs_from of this schedule
-			# insert another calendar date for the service that
-			#  runs_from the runs_to date of this schedule and runs_to the original runs_to
-			#
-			# note: rather than doing several chops
-			#  it might be worth detecting small overlays and adding them as exceptions
-			# for an example, run:
-			#  select id, train_uid, runs_from, runs_to,
-			#  stp_indicator, train_identity, train_category,
-			#  headcode from schedule where train_uid = "Y03228" order by id;
+		# note: rather than doing several chops
+		#  it might be worth detecting small overlays and adding them as exceptions
+		# for an example, run:
+		#  select id, train_uid, runs_from, runs_to,
+		#  stp_indicator, train_identity, train_category,
+		#  headcode from schedule where train_uid = "Y03228" order by id;
 
 		# XXX: populate gtfs.calendar_dates from bank holiday list
 		# # note: I think we only need to add the excludes
@@ -244,6 +288,20 @@ class DTDtoGTFS:
 		#  SELECT id, :date, 2 FROM schedule
 		#  WHERE bank_holiday_running = 0 AND :date BETWEEN runs_from AND runs_to
 
+		trip_svc_id = dict() # {trip_id: svc_id}, XXX: should have "clone or update" flag
+		for svc_id, (svc_span, trip_id_set) in enumerate(service_span_trips.items(), 1):
+			insert( 'gtfs.calendar', service_id=svc_id,
+				start_date=svc_span.start, end_date=svc_span.end, **svc_span.weekdays )
+			for trip_id in trip_id_set: trip_svc_id[trip_id] = svc_id
+
+
+		## Step-3: Assign service_id to gtfs.trips, duplicating where necessary.
+		# XXX: clone trip where service inteval was split in two and such
+
+		for trip_id, svc_id in trip_svc_id.items():
+			q('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id, trip_id)
+
+
 
 def main(args=None):
 	import argparse
@@ -251,7 +309,7 @@ def main(args=None):
 		description='Tool to convert imported DTD/CIF data'
 			' stored in one MySQL db to GTFS feed in another db.')
 
-	group = parser.add_argument_group('MySQL db parameters.')
+	group = parser.add_argument_group('MySQL db parameters')
 	group.add_argument('-s', '--src-cif-db',
 		default='cif', metavar='db-name',
 		help='Database name to read CIF data from (default: %(default)s).')
@@ -269,6 +327,9 @@ def main(args=None):
 		help='Name of "[group]" (ini section) in ~/.my.cnf ini file to use parameters from.')
 
 	group = parser.add_argument_group('Misc other options')
+	group.add_argument('-n', '--test-schedule-limit', type=int, metavar='n',
+		help='Do test-run with specified number of schedules only.'
+			' This always produces incorrect results, only useful for testing the code quickly.')
 	group.add_argument('-v', '--verbose', action='store_true',
 		help='Print info about non-critical errors and quirks found during conversion.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
@@ -286,6 +347,7 @@ def main(args=None):
 	# Useful stuff for ~/.my.cnf: host port user passwd connect_timeout
 	mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
 		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
-	with DTDtoGTFS(opts.src_cif_db, opts.dst_gtfs_db, mysql_conn_opts) as conv: conv.run()
+	with DTDtoGTFS(opts.src_cif_db, opts.dst_gtfs_db, mysql_conn_opts) as conv:
+		conv.run(opts.test_schedule_limit)
 
 if __name__ == '__main__': sys.exit(main())
