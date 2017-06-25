@@ -2,7 +2,7 @@
 
 import itertools as it, operator as op, functools as ft
 import os, sys, contextlib, logging, pathlib
-import collections, enum
+import collections, enum, math
 import datetime, calendar, locale
 
 import MySQLdb, MySQLdb.cursors # https://mysqlclient.readthedocs.io/
@@ -22,6 +22,8 @@ class LogStyleAdapter(logging.LoggerAdapter):
 		self.logger._log(level, LogMessage(msg, args, kws), (), log_kws)
 
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
+
+it_ngrams = lambda seq, n: zip(*(it.islice(seq, i, None) for i in range(n)))
 
 
 class NTCursor(MySQLdb.cursors.Cursor):
@@ -66,8 +68,52 @@ GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0
 GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 
 
-class GTFSTimespanError(Exception): pass
-class GTFSTimespan: pass # XXX: implement
+@ft.total_ordering
+class GTFSTimespan:
+
+	weekday_order = 'monday tuesday wednesday thursday friday saturday sunday'.split()
+
+	def __init__(self, start, end, except_days=None, weekdays=None):
+		assert all(isinstance(d, datetime.date) for d in it.chain([start, end], except_days or list()))
+		self.start, self.end = start, end
+		if isinstance(weekdays, dict): weekdays = tuple(weekdays[k] for k in self.weekday_order)
+		self.weekdays = tuple(weekdays)
+		self.except_days = frozenset(filter(
+			lambda day: not (start <= day <= end and self.weekdays[day.weekday()]),
+			except_days or list() )) # filters-out redundant exceptions that weren't valid anyway
+		self._hash_tuple = self.start, self.end, self.weekdays, self.except_days
+
+	def __lt__(self, span): return self._hash_tuple < span._hash_tuple
+	def __eq__(self, span): return self._hash_tuple == span._hash_tuple
+	def __hash__(self): return hash(self._hash_tuple)
+
+	@property
+	def weekday_dict(self): return dict(zip(self.weekday_order, self.weekdays))
+
+	def merge(self, span, exc_days_to_split=5):
+		'''Returns merged timespan or None if it's not possible.
+			exc_days_to_split = number of days in sequence
+				to tolerate as exceptions when merging two spans with small gap in-between.'''
+		# Generic way to merge spans would be to convert them all to "week bitmasks",
+		#  then just xor these together picking up repeating/emerging patterns on overlaps,
+		#  tolerating some number of mismatching bits as exceptions,
+		#  splitting on repeating zero-patterns.
+		# That seem to be way overcomplicated for the purposes of this conversion though.
+		# Simple algo here only merges overlapping or close intervals with same weekdays.
+		if self.weekdays != span.weekdays: return
+		s1, s2, weekdays = self, span, self.weekdays
+		if s1 == s2: return s1
+		if s1 > s2: s1, s2 = s2, s1
+		if s1.end <= s2.start: # overlap
+			return GTFSTimespan(
+				s1.start, max(s1.end, s2.end),
+				s1.except_days | s2.except_days, weekdays )
+		if math.ceil((s2.start - s1.end) * (sum(weekdays) / 7)) <= exc_days_to_split:
+			day, except_days = s1.end, set(s1.except_days | s2.except_days)
+			while day < s2.start:
+				day += datetime.timedelta(days=1)
+				if weekdays[day.weekday()]: except_days.add(day)
+			return GTFSTimespan(s1.start, s2.end, except_days, weekdays)
 
 
 class DTDtoGTFS:
@@ -75,8 +121,9 @@ class DTDtoGTFS:
 	# Forces errors on truncated values and issues in multi-row inserts
 	sql_mode = 'strict_all_tables'
 
-	def __init__(self, db_cif, db_gtfs, conn_opts_base):
-		self.db_cif, self.db_gtfs, self.conn_opts_base = db_cif, db_gtfs, conn_opts_base
+	def __init__(self, db_cif, db_gtfs, conn_opts_base, bank_holidays):
+		self.db_cif, self.db_gtfs = db_cif, db_gtfs
+		self.conn_opts_base, self.bank_holidays = conn_opts_base, bank_holidays
 		self.log, self.log_sql = get_logger('dtd2gtfs'), get_logger('dtd2gtfs.sql')
 
 	def __enter__(self):
@@ -159,12 +206,12 @@ class DTDtoGTFS:
 		#  - populate gtfs.calendar/gtfs.calendar_dates, cloning trips/stops where necessary
 		#
 		# So essentially converting many-to-many relation into many-to-one
-		#  with redundant trips, using service_span_trips as a temporary mtm index.
+		#  with redundant trips, using trip_svc_timespans as a temporary mtm index.
 		#
 		# XXX: processing of Z schedules
 		# XXX: processing of associations
 
-		service_span_trips = collections.defaultdict(set) # {svc_span: trip_id_set}
+		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
 
 
 		## Step-1: Add trips and stop_times for schedules
@@ -173,7 +220,7 @@ class DTDtoGTFS:
 		#   trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
 		#
 		# - No calendar/service_id entries are created here -
-		#   these will be merged in Step-2 via service_span_trips,
+		#   these will be merged in Step-2 via trip_svc_timespans,
 		#   and gtfs.trips will be updated with service_id values in Step-3,
 		#   duplicating gtfs.trip/gtfs.stop_times for timespans that can't be merged.
 
@@ -232,8 +279,9 @@ class DTDtoGTFS:
 
 			trip_hash, trip_stops = [s.train_uid], list()
 			svc_span = GTFSTimespan(
-				s.runs_from, s.runs_to, bank_holidays=bool(s.bank_holiday_running),
-				weekdays=dict((k.lower(), getattr(s, k.lower())) for k in calendar.day_name) )
+				s.runs_from, s.runs_to,
+				except_days=s.bank_holiday_running and self.bank_holidays,
+				weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order) )
 
 			## Process stop times
 			# XXX: time conversions - DTD->GTFS and late->next-day
@@ -268,38 +316,60 @@ class DTDtoGTFS:
 						arrival_time=ts_arr, departure_time=ts_dep,
 						stop_id=st.stop_id, stop_sequence=n,
 						pickup_type=int(pickup_type) )
-			service_span_trips[svc_span].add(trip_id)
+			trip_svc_timespans[trip_id].append(svc_span)
 
 
-		## Step-2: merge/optimize timespans in service_span_trips where possible
-		# XXX: no optimizations implemented yet
+		## Step-2: merge/optimize timespans in trip_svc_timespans where possible
 
-		# note: rather than doing several chops
-		#  it might be worth detecting small overlays and adding them as exceptions
-		# for an example, run:
-		#  select id, train_uid, runs_from, runs_to,
-		#  stp_indicator, train_identity, train_category,
-		#  headcode from schedule where train_uid = "Y03228" order by id;
+		svc_id_seq = iter(range(1, 2**30))
+		svc_merge_idx = dict() # {svc_span: svc_id} - to deduplicate svc_id for diff trips
 
-		# XXX: populate gtfs.calendar_dates from bank holiday list
-		# # note: I think we only need to add the excludes
-		# FOREACH BANK HOLIDAY
-		#  INSERT INTO calendar_dates
-		#  SELECT id, :date, 2 FROM schedule
-		#  WHERE bank_holiday_running = 0 AND :date BETWEEN runs_from AND runs_to
+		for trip_id, spans in trip_svc_timespans.items():
 
-		trip_svc_id = dict() # {trip_id: svc_id}, XXX: should have "clone or update" flag
-		for svc_id, (svc_span, trip_id_set) in enumerate(service_span_trips.items(), 1):
-			insert( 'gtfs.calendar', service_id=svc_id,
-				start_date=svc_span.start, end_date=svc_span.end, **svc_span.weekdays )
-			for trip_id in trip_id_set: trip_svc_id[trip_id] = svc_id
+			# Merge timespans where possible
+			if len(spans) > 1:
+				merged, spans_merged = None, list()
+				for s1, s2 in it_ngrams(sorted(spans), 2):
+					if merged: # s1 was already used in previous merge
+						merged = None
+						continue
+					merged = s1.merge(s2)
+					spans_merged.append(merged or s1)
+				if merged is None: spans_merged.append(s2)
+				spans = trip_svc_timespans[trip_id] = spans_merged
+
+			# Store spans into gtfs.calendar/gtfs.calendar_dates, assigning service_id to each
+			for n, span in enumerate(spans):
+				if span in svc_merge_idx: # reuse service_id for same exact span from diff trip
+					spans[n] = svc_id
+					continue
+				svc_id = spans[n] = svc_merge_idx[span] = next(svc_id_seq)
+				insert( 'gtfs.calendar', service_id=svc_id,
+					start_date=span.start, end_date=span.end, **span.weekday_dict )
+				for day in span.except_days:
+					insert( 'gtfs.calendar_dates', service_id=svc_id,
+						date=day, exception_type=int(GTFSExceptionType.removed) )
 
 
-		## Step-3: Assign service_id to gtfs.trips, duplicating where necessary.
-		# XXX: clone trip where service inteval was split in two and such
+		## Step-3: Store assigned service_id to gtfs.trips,
+		##  duplicating trip where there's >1 service_id associated with it.
 
-		for trip_id, svc_id in trip_svc_id.items():
-			q('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id, trip_id)
+		trip_id_seq = max(trip_svc_timespans) + 1
+		trip_id_seq = iter(range(trip_id_seq, trip_id_seq + 2**30))
+
+		for trip_id, svc_id_list in trip_svc_timespans.items():
+			q('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id_list[0], trip_id)
+			if len(svc_id_list) > 1:
+				trip, = q('SELECT * FROM gtfs.trips WHERE trip_id = %s', trip_id)
+				trip_stops = q('SELECT * FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
+				trip, trip_stops = trip._asdict(), list(s._asdict() for s in trip_stops)
+				for svc_id in svc_id_list[1:]:
+					trip_id = next(trip_id_seq)
+					trip.update(id=None, trip_id=trip_id)
+					insert('gtfs.trips', **trip)
+					for st in trip_stops:
+						st.update(id=None, trip_id=trip_id)
+						insert('gtfs.stop_times', **st)
 
 
 
@@ -326,6 +396,14 @@ def main(args=None):
 	group.add_argument('-g', '--mycnf-group', metavar='group',
 		help='Name of "[group]" (ini section) in ~/.my.cnf ini file to use parameters from.')
 
+	group = parser.add_argument_group('Extra data sources')
+	group.add_argument('-e', '--uk-bank-holiday-list',
+		metavar='file', default='doc/UK-bank-holidays.csv',
+		help='List of dates, one per line, for UK bank holidays. Default: %(default)s')
+	group.add_argument('--uk-bank-holiday-fmt',
+		metavar='strptime-format', default='%d-%b-%Y',
+		help='strptime() format for each line in -e/--uk-bank-holiday-list file. Default: %(default)s')
+
 	group = parser.add_argument_group('Misc other options')
 	group.add_argument('-n', '--test-schedule-limit', type=int, metavar='n',
 		help='Do test-run with specified number of schedules only.'
@@ -344,10 +422,18 @@ def main(args=None):
 		format='%(asctime)s :: %(name)s %(levelname)s :: %(message)s' )
 	log = get_logger('main')
 
+	bank_holidays = set()
+	if opts.uk_bank_holiday_list:
+		with pathlib.Path(opts.uk_bank_holiday_list).open() as src:
+			for line in src.read().splitlines():
+				bank_holidays.add(datetime.datetime.strptime(line, opts.uk_bank_holiday_fmt).date())
+
 	# Useful stuff for ~/.my.cnf: host port user passwd connect_timeout
 	mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
 		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
-	with DTDtoGTFS(opts.src_cif_db, opts.dst_gtfs_db, mysql_conn_opts) as conv:
+	with DTDtoGTFS(
+			opts.src_cif_db, opts.dst_gtfs_db,
+			mysql_conn_opts, bank_holidays ) as conv:
 		conv.run(opts.test_schedule_limit)
 
 if __name__ == '__main__': sys.exit(main())
