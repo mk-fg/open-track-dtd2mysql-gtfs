@@ -92,14 +92,9 @@ class GTFSTimespan:
 
 	def merge(self, span, exc_days_to_split=5):
 		'''Returns merged timespan or None if it's not possible.
+			Simple algo here only merges overlapping or close intervals with same weekdays.
 			exc_days_to_split = number of days in sequence
 				to tolerate as exceptions when merging two spans with small gap in-between.'''
-		# Generic way to merge spans would be to convert them all to "week bitmasks",
-		#  then just xor these together picking up repeating/emerging patterns on overlaps,
-		#  tolerating some number of mismatching bits as exceptions,
-		#  splitting on repeating zero-patterns.
-		# That seem to be way overcomplicated for the purposes of this conversion though.
-		# Simple algo here only merges overlapping or close intervals with same weekdays.
 		if self.weekdays != span.weekdays: return
 		s1, s2, weekdays = self, span, self.weekdays
 		if s1 == s2: return s1
