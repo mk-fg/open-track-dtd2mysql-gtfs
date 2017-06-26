@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-import os, sys, contextlib, logging, pathlib
-import collections, enum, math
+import os, sys, contextlib, logging, pathlib, re
+import collections, secrets, enum, math, time
 import datetime, calendar, locale
 
 import MySQLdb, MySQLdb.cursors # https://mysqlclient.readthedocs.io/
@@ -21,7 +21,41 @@ class LogStyleAdapter(logging.LoggerAdapter):
 		msg, kws = self.process(msg, kws)
 		self.logger._log(level, LogMessage(msg, args, kws), (), log_kws)
 
+def log_lines(log_func, lines, log_func_last=False):
+	if isinstance(lines, str):
+		lines = list(line.rstrip() for line in lines.rstrip().split('\n'))
+	uid = secrets.token_urlsafe(3)
+	for n, line in enumerate(lines, 1):
+		if isinstance(line, str): line = '[{}] {}', uid, line
+		else: line = ['[{}] {}'.format(uid, line[0])] + list(line[1:])
+		if log_func_last and n == len(lines): log_func_last(*line)
+		else: log_func(*line)
+
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
+
+def progress_iter(log, prefix, n_max, steps=30, n=0):
+	'''Returns progress logging coroutine for long calculations.
+		Use e.g. coro.send([result-size={:,}, res_size]) on each iteration.
+		These messages will only be formatted and
+			logged "steps" times, evenly spaced thru n_max iterations.'''
+	steps = min(n_max, steps)
+	step_n = steps and n_max / steps
+	msg_tpl = '[{{}}] Step {{:>{0}.0f}} / {{:{0}d}}{{}}'.format(len(str(steps)))
+	def _progress_iter_coro(n):
+		while True:
+			dn_msg = yield
+			if isinstance(dn_msg, tuple): dn, msg = dn_msg
+			elif isinstance(dn_msg, int): dn, msg = dn_msg, None
+			else: dn, msg = 1, dn_msg
+			n += dn
+			if n == dn or n % step_n < 1:
+				if msg:
+					if not isinstance(msg, str): msg = msg[0].format(*msg[1:])
+					msg = ': {}'.format(msg)
+				log.debug(msg_tpl, prefix, n / step_n, steps, msg or '')
+	coro = _progress_iter_coro(n)
+	next(coro)
+	return coro
 
 it_ngrams = lambda seq, n: zip(*(it.islice(seq, i, None) for i in range(n)))
 
@@ -145,12 +179,14 @@ class DTDtoGTFS:
 
 	def q(self, q, *params, fetch=True):
 		with self.db.cursor(NTCursor) as cur:
-			if self.log_sql.isEnabledFor(logging.DEBUG):
-				p_log = str(params)
-				if len(p_log) > 150: p_log = f'{p_log[:150]}...[len={len(p_log)}]'
-				self.log_sql.debug('{!r} {}', ' '.join(q.split()), p_log)
+			# if self.log_sql.isEnabledFor(logging.DEBUG):
+			# 	p_log = str(params)
+			# 	if len(p_log) > 150: p_log = f'{p_log[:150]}...[len={len(p_log)}]'
+			# 	self.log_sql.debug('{!r} {}', ' '.join(q.split()), p_log)
 			cur.execute(q, params)
-			return cur.fetchall() if fetch else cur.lastrowid
+			if not fetch: return cur.lastrowid
+			elif callable(fetch): return fetch(cur)
+			return cur.fetchall()
 
 	def insert(self, table, **row):
 		row = collections.OrderedDict(row.items())
@@ -207,6 +243,7 @@ class DTDtoGTFS:
 		# XXX: processing of associations
 
 		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
+		stats, stats_by_train = collections.Counter(), collections.defaultdict(collections.Counter)
 
 
 		## Step-1: Add trips and stop_times for schedules
@@ -219,18 +256,41 @@ class DTDtoGTFS:
 		#   and gtfs.trips will be updated with service_id values in Step-3,
 		#   duplicating gtfs.trip/gtfs.stop_times for timespans that can't be merged.
 
-		# This limit is for test-runs on small slices only
-		schedule_limit = '' if not test_run_slice else f'LIMIT {test_run_slice}'
-
 		route_ids = dict() # {(src, dst}: id}
 		trip_merge_idx = dict() # {trip_hash: gtfs.trip_id}
 
-		# XXX: add progress tracking here
-		for s in q(f'''
-				SELECT *
-				FROM cif.schedule s
-				LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
-				ORDER BY s.train_uid, s.id {schedule_limit}'''):
+		schedules = f'''
+			SELECT *
+			FROM cif.schedule s
+
+			--[ Random selection used with test_run_slice only ]--
+			JOIN
+				( SELECT DISTINCT(train_uid) AS train_uid
+					FROM cif.schedule rs
+					JOIN
+						(SELECT CEIL(RAND() * (SELECT MAX(id) FROM cif.schedule)) AS id) rss
+						ON rs.id >= rss.id
+					GROUP BY train_uid HAVING COUNT(*) > 0
+					LIMIT {test_run_slice} ) r
+				ON r.train_uid = s.train_uid
+			--[ end ]--
+
+			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
+			ORDER BY s.train_uid, s.id'''
+		schedules = re.sub(r'(?s)--\[.*{}\]--'.format('?' if test_run_slice else ''), '', schedules)
+		sched_count, schedules = q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
+		ts_start, progress = time.time(), progress_iter(self.log, 'schedules', sched_count)
+		stats['sched-count'] = sched_count
+
+		self.log.debug('Processing {} cif.schedule entries...', sched_count)
+		for n, s in enumerate(schedules):
+			ts_delta = time.time() - ts_start
+			ts_delta_est = ((sched_count - n) / (n / ts_delta)) if n else 0
+			progress.send([
+				'{1:02,.0f}.{2:02,.0f}s trips={0:,}',
+				len(trip_svc_timespans), ts_delta, ts_delta_est ])
+			stats[f'sched-entry-{s.stp_indicator}'] += 1
+			stats_by_train[s.train_uid][f'stp-{s.stp_indicator}'] += 1
 
 			# XXX: handle overrides later
 			if s.stp_indicator != 'P': continue
@@ -256,6 +316,7 @@ class DTDtoGTFS:
 
 			# XXX: note on route_ids? - "how to do routes? get the toc in from schedule_extra"
 			# XXX: optimize - merge/split same as services
+			# XXX: route metadata
 			route_key = stops[0].id, stops[-1].id
 			if route_key in route_ids: route_id = route_ids[route_key]
 			else:
@@ -271,6 +332,8 @@ class DTDtoGTFS:
 			#    when it's same cif.train_uid and same stops at the same days/times.
 			#  - Again, it's not enough to just check train_uid, as schedules
 			#    with same cif.train_uid can have different gtfs.stop sequences.
+			#  - If additional metadata will be added to gtfs.trips,
+			#    might be necessary to hash it as well, or just get rid of dedup here.
 
 			trip_hash, trip_stops = [s.train_uid], list()
 			svc_span = GTFSTimespan(
@@ -298,7 +361,9 @@ class DTDtoGTFS:
 
 			## Check if such gtfs.trip already exists and only needs gtfs.calendar entry
 			trip_hash = hash(tuple(trip_hash))
-			if trip_hash in trip_merge_idx: trip_id = trip_merge_idx[trip_hash]
+			if trip_hash in trip_merge_idx:
+				stats['trip-dedup'] += 1
+				trip_id = trip_merge_idx[trip_hash]
 			else:
 				trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx)
 				# XXX: check if more trip/stop metadata can be filled-in here
@@ -313,12 +378,15 @@ class DTDtoGTFS:
 						pickup_type=int(pickup_type) )
 			trip_svc_timespans[trip_id].append(svc_span)
 
+		stats['trip-count'] = len(trip_svc_timespans)
+
 
 		## Step-2: merge/optimize timespans in trip_svc_timespans where possible
 
 		svc_id_seq = iter(range(1, 2**30))
 		svc_merge_idx = dict() # {svc_span: svc_id} - to deduplicate svc_id for diff trips
 
+		self.log.debug('Merging service timespans for {} gtfs.trips...', len(trip_svc_timespans))
 		for trip_id, spans in trip_svc_timespans.items():
 
 			# Merge timespans where possible
@@ -329,13 +397,16 @@ class DTDtoGTFS:
 						merged = None
 						continue
 					merged = s1.merge(s2)
+					if merged: stats['svc-merge-op'] += 1
 					spans_merged.append(merged or s1)
 				if merged is None: spans_merged.append(s2)
+				if len(spans) != len(spans_merged): stats['svc-merge'] += 1
 				spans = trip_svc_timespans[trip_id] = spans_merged
 
 			# Store spans into gtfs.calendar/gtfs.calendar_dates, assigning service_id to each
 			for n, span in enumerate(spans):
 				if span in svc_merge_idx: # reuse service_id for same exact span from diff trip
+					stats['svc-dedup'] += 1
 					spans[n] = svc_id
 					continue
 				svc_id = spans[n] = svc_merge_idx[span] = next(svc_id_seq)
@@ -345,20 +416,25 @@ class DTDtoGTFS:
 					insert( 'gtfs.calendar_dates', service_id=svc_id,
 						date=day, exception_type=int(GTFSExceptionType.removed) )
 
+		stats['svc-count'] = len(svc_merge_idx)
+
 
 		## Step-3: Store assigned service_id to gtfs.trips,
 		##  duplicating trip where there's >1 service_id associated with it.
 
-		trip_id_seq = max(trip_svc_timespans) + 1
+		trip_id_seq = max(trip_svc_timespans or [0]) + 1
 		trip_id_seq = iter(range(trip_id_seq, trip_id_seq + 2**30))
 
+		self.log.debug('Updating service_id in gtfs.trips table...')
 		for trip_id, svc_id_list in trip_svc_timespans.items():
 			q('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id_list[0], trip_id)
 			if len(svc_id_list) > 1:
 				trip, = q('SELECT * FROM gtfs.trips WHERE trip_id = %s', trip_id)
 				trip_stops = q('SELECT * FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
 				trip, trip_stops = trip._asdict(), list(s._asdict() for s in trip_stops)
+				stats['trip-row-dup'] += 1
 				for svc_id in svc_id_list[1:]:
+					stats['trip-row-dup-op'] += 1
 					trip_id = next(trip_id_seq)
 					trip.update(id=None, trip_id=trip_id)
 					insert('gtfs.trips', **trip)
@@ -366,6 +442,19 @@ class DTDtoGTFS:
 						st.update(id=None, trip_id=trip_id)
 						insert('gtfs.stop_times', **st)
 
+		stats_override_counts = list()
+		stats.update({'train-count': len(stats_by_train), 'train-with-override': 0})
+		for train_uid, train_stats in stats_by_train.items():
+			sched_override_count = sum(
+				v for k,v in train_stats.items() if k != 'stp-P' and k.startswith('stp-') )
+			stats_override_counts.append(sched_override_count)
+			if sched_override_count > 0: stats['train-with-override'] += 1
+		stats.update({ 'train-override-median':
+			sum(stats_override_counts) / len(stats_override_counts) })
+
+		log_lines(log.debug, ['Stats:', *(
+			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
+			for k,v in sorted(stats.items()) )])
 
 
 def main(args=None):
