@@ -355,21 +355,18 @@ class DTDtoGTFS:
 						s.runs_from, s.runs_to,
 						except_days=s.bank_holiday_running and self.bank_holidays,
 						weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order) )
-					span_diff_any = False
+					span_diff_any = False # only for quirk-tracking in stats below
 					for trip_id in list(train_trip_ids):
 						spans = trip_svc_timespans[trip_id]
 						for n, span in enumerate(spans):
 							try:
 								span_diff = span.difference(span_cancel)
 								if span_diff == span: continue # no intersection with this span
-							except GTFSTimespanError: # entry gets completely cancelled
-								self.q('DELETE FROM gtfs.trips WHERE trip_id = %s', trip_id)
-								self.q('DELETE FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
-								train_trip_ids.remove(trip_id)
-								trip_svc_timespans.pop(trip_id)
-								self.stats['trip-cancel-total'] += 1
+							except GTFSTimespanError: # span gets cancelled completely
+								trip_svc_timespans.remove(span)
+								self.stats['span-cancel-total'] += 1
 							else:
-								self.stats['trip-cancel-op'] += 1
+								self.stats['span-cancel-part'] += 1
 								span_diff_any, spans[n] = True, span_diff
 					if span_diff_any: self.stats['trip-cancel'] += 1
 					else: self.stats['trip-cancel-noop'] += 1
@@ -499,6 +496,9 @@ class DTDtoGTFS:
 					self.insert( 'gtfs.calendar_dates', service_id=svc_id,
 						date=day, exception_type=int(GTFSExceptionType.removed) )
 
+			if len(spans) == 1: self.stats['trip-spans-1'] += 1
+			elif not spans: self.stats['trip-spans-0'] += 1
+
 		self.stats['svc-count'] = len(svc_merge_idx)
 		return trip_svc_ids
 
@@ -512,6 +512,10 @@ class DTDtoGTFS:
 
 		self.log.debug('Updating service_id in gtfs.trips table...')
 		for trip_id, svc_id_list in trip_svc_ids.items():
+			if not svc_id_list: # all timespans for trip got cancelled somehow
+				self.q('DELETE FROM gtfs.trips WHERE trip_id = %s', trip_id)
+				self.q('DELETE FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
+				continue
 			self.q('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id_list[0], trip_id)
 			if len(svc_id_list) > 1:
 				trip, = self.q('SELECT * FROM gtfs.trips WHERE trip_id = %s', trip_id)
