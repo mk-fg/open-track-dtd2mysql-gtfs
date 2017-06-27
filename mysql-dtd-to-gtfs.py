@@ -149,7 +149,9 @@ class GTFSTimespan:
 	def difference(self, span):
 		'Return new timespan with passed span excluded from it.'
 		assert not span.except_days # should be empty for stp=C entries anyway
-		if self.weekdays == span.weekdays: # adjust start/end
+		if ( self.weekdays == span.weekdays
+				and not (span.start > self.start and span.end < self.end) ):
+			# Adjust start/end of the timespan
 			start, end = self.start, self.end
 			if span.start <= self.start: start = span.end
 			if span.end >= self.end: end = span.start
