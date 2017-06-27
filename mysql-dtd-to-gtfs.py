@@ -368,6 +368,8 @@ class DTDtoGTFS:
 								trip_svc_timespans.remove(span)
 								self.stats['span-cancel-total'] += 1
 							else:
+								if span.weekdays != span_cancel.weekdays:
+									self.stats['span-cancel-weekdays-diff'] += 1
 								self.stats['span-cancel-part'] += 1
 								span_diff_any, spans[n] = True, span_diff
 					if span_diff_any: self.stats['trip-cancel'] += 1
