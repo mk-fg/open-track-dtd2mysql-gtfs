@@ -110,8 +110,8 @@ class GTFSTimespan:
 	def __init__(self, start, end, except_days=None, weekdays=None):
 		assert all(isinstance(d, datetime.date) for d in it.chain([start, end], except_days or list()))
 		self.start, self.end = start, end
-		if isinstance(weekdays, dict): weekdays = tuple(weekdays[k] for k in self.weekday_order)
-		self.weekdays = tuple(weekdays)
+		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
+		self.weekdays = tuple(map(int, weekdays))
 		self.except_days = frozenset(filter(
 			lambda day: not (start <= day <= end and self.weekdays[day.weekday()]),
 			except_days or list() )) # filters-out redundant exceptions that weren't valid anyway
@@ -175,8 +175,6 @@ class DTDtoGTFS:
 		if self.ctx: self.ctx = self.ctx.close()
 
 
-	## Conversion routine
-
 	def q(self, q, *params, fetch=True):
 		with self.db.cursor(NTCursor) as cur:
 			# if self.log_sql.isEnabledFor(logging.DEBUG):
@@ -193,6 +191,7 @@ class DTDtoGTFS:
 		cols, vals = ','.join(row.keys()), ','.join(['%s']*len(row))
 		return self.q( f'INSERT INTO'
 			f' {table} ({cols}) VALUES ({vals})', *row.values(), fetch=False )
+
 
 	def run(self, test_run_slice=None):
 		q, insert = self.q, self.insert
@@ -312,6 +311,7 @@ class DTDtoGTFS:
 			if not stops:
 				# XXX: there are quite a lot of these - check what these represent
 				# self.log.info('Skipping schedule with no usable stops: {}', s)
+				stats['sched-without-stops'] += 1
 				continue
 
 			# XXX: note on route_ids? - "how to do routes? get the toc in from schedule_extra"
@@ -422,7 +422,7 @@ class DTDtoGTFS:
 		## Step-3: Store assigned service_id to gtfs.trips,
 		##  duplicating trip where there's >1 service_id associated with it.
 
-		trip_id_seq = max(trip_svc_timespans or [0]) + 1
+		trip_id_seq = max(trip_svc_timespans, default=0) + 1
 		trip_id_seq = iter(range(trip_id_seq, trip_id_seq + 2**30))
 
 		self.log.debug('Updating service_id in gtfs.trips table...')
@@ -443,7 +443,7 @@ class DTDtoGTFS:
 						insert('gtfs.stop_times', **st)
 
 		stats_override_counts = list()
-		stats.update({'train-count': len(stats_by_train), 'train-with-override': 0})
+		stats['train-count'] = len(stats_by_train)
 		for train_uid, train_stats in stats_by_train.items():
 			sched_override_count = sum(
 				v for k,v in train_stats.items() if k != 'stp-P' and k.startswith('stp-') )
@@ -452,7 +452,7 @@ class DTDtoGTFS:
 		stats.update({ 'train-override-median':
 			sum(stats_override_counts) / len(stats_override_counts) })
 
-		log_lines(log.debug, ['Stats:', *(
+		log_lines(self.log.debug, ['Stats:', *(
 			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
 			for k,v in sorted(stats.items()) )])
 
@@ -489,16 +489,15 @@ def main(args=None):
 		help='strptime() format for each line in -e/--uk-bank-holiday-list file. Default: %(default)s')
 
 	group = parser.add_argument_group('Misc other options')
-	group.add_argument('-n', '--test-schedule-limit', type=int, metavar='n',
-		help='Do test-run with specified number of schedules only.'
-			' This always produces incorrect results, only useful for testing the code quickly.')
+	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
+		help='Do test-run with specified number of randomly-selected trains only.'
+			' This always produces incomplete results, only useful for testing the code quickly.')
 	group.add_argument('-v', '--verbose', action='store_true',
 		help='Print info about non-critical errors and quirks found during conversion.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
-	global log
 	if opts.debug: log = logging.DEBUG
 	elif opts.verbose: log = logging.INFO
 	else: log = logging.WARNING
@@ -518,6 +517,6 @@ def main(args=None):
 	with DTDtoGTFS(
 			opts.src_cif_db, opts.dst_gtfs_db,
 			mysql_conn_opts, bank_holidays ) as conv:
-		conv.run(opts.test_schedule_limit)
+		conv.run(opts.test_train_limit)
 
 if __name__ == '__main__': sys.exit(main())
