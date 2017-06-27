@@ -102,6 +102,8 @@ GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0
 GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 
 
+class GTFSTimespanError(Exception): pass
+
 @ft.total_ordering
 class GTFSTimespan:
 
@@ -125,7 +127,7 @@ class GTFSTimespan:
 	def weekday_dict(self): return dict(zip(self.weekday_order, self.weekdays))
 
 	def merge(self, span, exc_days_to_split=5):
-		'''Returns merged timespan or None if it's not possible.
+		'''Return new merged timespan or None if it's not possible.
 			Simple algo here only merges overlapping or close intervals with same weekdays.
 			exc_days_to_split = number of days in sequence
 				to tolerate as exceptions when merging two spans with small gap in-between.'''
@@ -137,12 +139,30 @@ class GTFSTimespan:
 			return GTFSTimespan(
 				s1.start, max(s1.end, s2.end),
 				s1.except_days | s2.except_days, weekdays )
-		if math.ceil((s2.start - s1.end) * (sum(weekdays) / 7)) <= exc_days_to_split:
+		if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split:
 			day, except_days = s1.end, set(s1.except_days | s2.except_days)
 			while day < s2.start:
 				day += datetime.timedelta(days=1)
 				if weekdays[day.weekday()]: except_days.add(day)
 			return GTFSTimespan(s1.start, s2.end, except_days, weekdays)
+
+	def difference(self, span):
+		'Return new timespan with passed span excluded from it.'
+		assert not span.except_days # should be empty for stp=C entries anyway
+		if self.weekdays == span.weekdays: # adjust start/end
+			start, end = self.start, self.end
+			if span.start <= self.start: start = span.end
+			if span.end >= self.end: end = span.start
+			if start > end: raise GTFSTimespanError('Empty timespan result')
+			return GTFSTimespan(start, end, self.except_days, self.weekdays)
+		# Otherwise just add as exception days
+		day, except_days = span.start, set(self.except_days)
+		while day <= span.end:
+			day += datetime.timedelta(days=1)
+			if span.weekdays[day.weekday()]: except_days.add(day)
+		return GTFSTimespan(self.start, self.end, except_days, self.weekdays)
+
+
 
 
 class DTDtoGTFS:
@@ -306,7 +326,7 @@ class DTDtoGTFS:
 		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
 			# Scheduled are grouped by train_uid here to apply overrides (stp=O, stp=C) easily
 
-			# XXX: trip_id init/reset here for overrides
+			train_trip_ids = set() # for processing schedule override entries
 
 			for s in train_schedules:
 
@@ -328,7 +348,34 @@ class DTDtoGTFS:
 				self.stats[f'sched-entry-{s.stp_indicator}'] += 1
 				self.stats_by_train[s.train_uid][f'stp-{s.stp_indicator}'] += 1
 
-				# XXX: handle overrides later
+				### Special processing for stp=C entries - adjust timespans of stp=P entries
+
+				if s.stp_indicator == 'C':
+					span_cancel = GTFSTimespan(
+						s.runs_from, s.runs_to,
+						except_days=s.bank_holiday_running and self.bank_holidays,
+						weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order) )
+					span_diff_any = False
+					for trip_id in list(train_trip_ids):
+						spans = trip_svc_timespans[trip_id]
+						for n, span in enumerate(spans):
+							try:
+								span_diff = span.difference(span_cancel)
+								if span_diff == span: continue # no intersection with this span
+							except GTFSTimespanError: # entry gets completely cancelled
+								self.q('DELETE FROM gtfs.trips WHERE trip_id = %s', trip_id)
+								self.q('DELETE FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
+								train_trip_ids.remove(trip_id)
+								trip_svc_timespans.pop(trip_id)
+								self.stats['trip-cancel-total'] += 1
+							else:
+								self.stats['trip-cancel-op'] += 1
+								span_diff_any, spans[n] = True, span_diff
+					if span_diff_any: self.stats['trip-cancel'] += 1
+					else: self.stats['trip-cancel-noop'] += 1
+					continue
+
+				# XXX: process stp=O entries
 				if s.stp_indicator != 'P': continue
 
 				### Processing for trip stops
@@ -407,6 +454,7 @@ class DTDtoGTFS:
 						arrival_time=ts_arr, departure_time=ts_dep,
 						stop_id=st.stop_id, stop_sequence=n, )
 				trip_svc_timespans[trip_id].append(svc_span)
+				train_trip_ids.add(trip_id)
 
 		self.stats['trip-count'] = len(trip_svc_timespans)
 		return trip_svc_timespans
