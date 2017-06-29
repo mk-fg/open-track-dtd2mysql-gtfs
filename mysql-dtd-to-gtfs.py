@@ -102,12 +102,13 @@ GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0
 GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 
 
-class GTFSTimespanError(Exception): pass
+class GTFSTimespanEmpty(Exception): pass
 
 @ft.total_ordering
 class GTFSTimespan:
 
 	weekday_order = 'monday tuesday wednesday thursday friday saturday sunday'.split()
+	one_day = datetime.timedelta(days=1)
 
 	def __init__(self, start, end, except_days=None, weekdays=None):
 		assert all(isinstance(d, datetime.date) for d in it.chain([start, end], except_days or list()))
@@ -131,7 +132,7 @@ class GTFSTimespan:
 		while day <= self.end:
 			if ( self.weekdays[day.weekday()]
 				and day not in self.except_days ): yield day
-			day += datetime.timedelta(days=1)
+			day += self.one_day
 
 	def merge(self, span, exc_days_to_split=5):
 		'''Return new merged timespan or None if it's not possible.
@@ -150,11 +151,12 @@ class GTFSTimespan:
 			day, except_days = s1.end, set(s1.except_days | s2.except_days)
 			while day <= s2.start:
 				if weekdays[day.weekday()]: except_days.add(day)
-				day += datetime.timedelta(days=1)
+				day += self.one_day
 			return GTFSTimespan(s1.start, s2.end, except_days, weekdays)
 
 	def difference(self, span):
-		'Return new timespan with passed span excluded from it.'
+		'''Return new timespan with passed span excluded from it.
+			GTFSTimespanEmpty is raised if passed span completely overlaps this one.'''
 		assert not span.except_days # should be empty for stp=C entries anyway
 		if ( self.weekdays == span.weekdays
 				and not (span.start > self.start and span.end < self.end) ):
@@ -162,17 +164,31 @@ class GTFSTimespan:
 			start, end = self.start, self.end
 			if span.start <= self.start: start = span.end
 			if span.end >= self.end: end = span.start
-			if start > end: raise GTFSTimespanError('Empty timespan result')
+			if start > end: raise GTFSTimespanEmpty('Empty timespan result')
 			return GTFSTimespan(start, end, self.except_days, self.weekdays)
 		# Otherwise just add as exception days
 		day, except_days = span.start, set(self.except_days)
 		while day <= span.end:
 			if span.weekdays[day.weekday()]: except_days.add(day)
-			day += datetime.timedelta(days=1)
+			day += self.one_day
 		span_diff = GTFSTimespan(self.start, self.end, except_days, self.weekdays)
 		try: next(span_diff.date_iter())
-		except StopIteration: raise GTFSTimespanError('Empty timespan result')
+		except StopIteration: raise GTFSTimespanEmpty('Empty timespan result')
 		return span_diff
+
+	def subtract_days(self, day_from, day_to):
+		'''Return list of new timespans from this one without
+				specified date interval or None if there's no intersection.
+			GTFSTimespanEmpty is raised if there is nothing left after subtraction.'''
+		if self.start > day_to or self.end < day_from: return # no overlap
+		start, end = self.start, self.end
+		if day_from > start and day_to < end: # splits timespan in two
+			return [
+				GTFSTimespan(start, day_from - self.one_day, self.except_days, self.weekdays),
+				GTFSTimespan(day_to + self.one_day, self.end, self.except_days, self.weekdays) ]
+		if day_from <= start: start = day_to + self.one_day
+		if day_to >= end: end = day_from - self.one_day
+		return [GTFSTimespan(start, end, self.except_days, self.weekdays)]
 
 
 class DTDtoGTFS:
@@ -305,6 +321,8 @@ class DTDtoGTFS:
 
 		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
 
+		# Ordering here includes s.stp_indicator so that all "permanent" schedules
+		#  get processed first, as they don't necessarily come before C and O records.
 		schedules = f'''
 			SELECT *
 			FROM cif.schedule s
@@ -334,11 +352,14 @@ class DTDtoGTFS:
 
 		self.log.debug('Processing {} cif.schedule entries...', sched_count)
 		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
-			# Scheduled are grouped by train_uid here to apply overrides (stp=O, stp=C) easily
+			# Schedules are grouped by train_uid here to apply overrides (stp=O, stp=C) easily
 
 			train_trip_ids = set() # for processing stp=O and stp=C entries
 
 			for s in train_schedules:
+				if s.stp_indicator not in 'POC':
+					self.log.info('Skipping unrecognized stp_indicator value: {!r}', s.stp_indicator)
+					continue
 
 				# Notes on gtfs.trips:
 				# - Trips are considered equal (via trip_hash) for gtfs purposes
@@ -358,34 +379,37 @@ class DTDtoGTFS:
 				self.stats[f'sched-entry-{s.stp_indicator}'] += 1
 				self.stats_by_train[s.train_uid][f'stp-{s.stp_indicator}'] += 1
 
-				### Special processing for stp=C entries - adjust any existing timespans
+				### Service timespan for this schedule
+
+				svc_span = GTFSTimespan(
+					s.runs_from, s.runs_to,
+					except_days=s.bank_holiday_running and self.bank_holidays,
+					weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order) )
+
+				### Special processing for stp=C (CAN/cancel) entries
+				# Just subtract this "cancelled" timespan from all timespans for train_uid
 
 				if s.stp_indicator == 'C':
-					span_cancel = GTFSTimespan(
-						s.runs_from, s.runs_to,
-						except_days=s.bank_holiday_running and self.bank_holidays,
-						weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order) )
 					span_diff_any = False # only for quirk-tracking in stats below
-					for trip_id in list(train_trip_ids):
+					for trip_id in train_trip_ids:
 						spans = trip_svc_timespans[trip_id]
 						for n, span in enumerate(spans):
 							try:
-								span_diff = span.difference(span_cancel)
+								span_diff = span.difference(svc_span)
 								if span_diff == span: continue # no intersection with this span
-							except GTFSTimespanError: # span gets cancelled completely
-								trip_svc_timespans.remove(span)
+							except GTFSTimespanEmpty: # span gets cancelled completely
+								spans[n] = None
 								self.stats['span-cancel-total'] += 1
 							else:
-								if span.weekdays != span_cancel.weekdays:
+								if span.weekdays != svc_span.weekdays:
 									self.stats['span-cancel-weekdays-diff'] += 1
+								spans[n] = span_diff
 								self.stats['span-cancel-part'] += 1
-								span_diff_any, spans[n] = True, span_diff
+						trip_svc_timespans[trip_id] = list(filter(None, spans))
+						span_diff_any = trip_svc_timespans[trip_id] == spans
 					if span_diff_any: self.stats['trip-cancel'] += 1
 					else: self.stats['trip-cancel-noop'] += 1
 					continue
-
-				# XXX: process stp=O entries
-				if s.stp_indicator != 'P': continue
 
 				### Processing for trip stops
 
@@ -404,10 +428,6 @@ class DTDtoGTFS:
 					continue
 
 				trip_hash, trip_stops = [s.train_uid], list()
-				svc_span = GTFSTimespan(
-					s.runs_from, s.runs_to,
-					except_days=s.bank_holiday_running and self.bank_holidays,
-					weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order) )
 
 				# XXX: time conversions - DTD->GTFS and late->next-day
 				for n, st in enumerate(stops, 1):
@@ -464,6 +484,31 @@ class DTDtoGTFS:
 						stop_id=st.stop_id, stop_sequence=n, )
 				trip_svc_timespans[trip_id].append(svc_span)
 				train_trip_ids.add(trip_id)
+
+				### Special processing for stp=O (VAR/overlay) entries
+				# If this trip is an overlay for previous schedule(s),
+				#  remove all runs_from-run_to days covered in its timespan from there.
+
+				if s.stp_indicator == 'O':
+					span_overlay_applied = False # only for quirk-tracking in stats below
+					for trip_id in train_trip_ids.difference([trip_id]): # so it'd never cancel itself
+						spans_new = list()
+						for span in trip_svc_timespans[trip_id]:
+							try: span_slices = span.subtract_days(s.runs_from, s.runs_to)
+							except GTFSTimespanEmpty: # span gets cancelled completely
+								self.stats['span-overlay-total'] += 1
+								continue
+							if span_slices is None: # no intersection with this span
+								spans_new.append(span)
+								continue
+							if len(span_slices) > 1: self.stats['span-overlay-split'] += 1
+							else: self.stats['span-overlay-part'] += 1
+							spans_new.extend(span_slices)
+						if spans_new != trip_svc_timespans[trip_id]:
+							trip_svc_timespans[trip_id] = spans_new
+							span_overlay_applied = True
+					if span_overlay_applied: self.stats['trip-overlay'] += 1
+					else: self.stats['trip-overlay-noop'] += 1
 
 		self.stats['trip-count'] = len(trip_svc_timespans)
 		return trip_svc_timespans
@@ -527,6 +572,7 @@ class DTDtoGTFS:
 			if not svc_id_list: # all timespans for trip got cancelled somehow
 				self.q('DELETE FROM gtfs.trips WHERE trip_id = %s', trip_id)
 				self.q('DELETE FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
+				self.stats['trip-delete'] += 1
 				continue
 			self.q('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id_list[0], trip_id)
 			if len(svc_id_list) > 1:
