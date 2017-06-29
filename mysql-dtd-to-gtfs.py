@@ -126,6 +126,13 @@ class GTFSTimespan:
 	@property
 	def weekday_dict(self): return dict(zip(self.weekday_order, self.weekdays))
 
+	def date_iter(self):
+		day, date_list = self.start, list()
+		while day <= self.end:
+			if ( self.weekdays[day.weekday()]
+				and day not in self.except_days ): yield day
+			day += datetime.timedelta(days=1)
+
 	def merge(self, span, exc_days_to_split=5):
 		'''Return new merged timespan or None if it's not possible.
 			Simple algo here only merges overlapping or close intervals with same weekdays.
@@ -141,9 +148,9 @@ class GTFSTimespan:
 				s1.except_days | s2.except_days, weekdays )
 		if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split:
 			day, except_days = s1.end, set(s1.except_days | s2.except_days)
-			while day < s2.start:
-				day += datetime.timedelta(days=1)
+			while day <= s2.start:
 				if weekdays[day.weekday()]: except_days.add(day)
+				day += datetime.timedelta(days=1)
 			return GTFSTimespan(s1.start, s2.end, except_days, weekdays)
 
 	def difference(self, span):
@@ -160,11 +167,12 @@ class GTFSTimespan:
 		# Otherwise just add as exception days
 		day, except_days = span.start, set(self.except_days)
 		while day <= span.end:
-			day += datetime.timedelta(days=1)
 			if span.weekdays[day.weekday()]: except_days.add(day)
-		return GTFSTimespan(self.start, self.end, except_days, self.weekdays)
-
-
+			day += datetime.timedelta(days=1)
+		span_diff = GTFSTimespan(self.start, self.end, except_days, self.weekdays)
+		try: next(span_diff.date_iter())
+		except StopIteration: raise GTFSTimespanError('Empty timespan result')
+		return span_diff
 
 
 class DTDtoGTFS:
@@ -314,7 +322,7 @@ class DTDtoGTFS:
 			--[ end ]--
 
 			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
-			ORDER BY s.train_uid, s.id'''
+			ORDER BY s.train_uid, s.stp_indicator != 'P', s.id'''
 		schedules = re.sub(r'(?s)--\[.*{}\]--'.format('?' if test_run_slice else ''), '', schedules)
 		sched_count, schedules = self.q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
 
@@ -328,7 +336,7 @@ class DTDtoGTFS:
 		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
 			# Scheduled are grouped by train_uid here to apply overrides (stp=O, stp=C) easily
 
-			train_trip_ids = set() # for processing schedule override entries
+			train_trip_ids = set() # for processing stp=O and stp=C entries
 
 			for s in train_schedules:
 
@@ -350,7 +358,7 @@ class DTDtoGTFS:
 				self.stats[f'sched-entry-{s.stp_indicator}'] += 1
 				self.stats_by_train[s.train_uid][f'stp-{s.stp_indicator}'] += 1
 
-				### Special processing for stp=C entries - adjust timespans of stp=P entries
+				### Special processing for stp=C entries - adjust any existing timespans
 
 				if s.stp_indicator == 'C':
 					span_cancel = GTFSTimespan(
