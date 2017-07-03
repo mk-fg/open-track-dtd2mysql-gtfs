@@ -48,9 +48,10 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 		Use e.g. coro.send([result-size={:,}, res_size]) on each iteration.
 		These messages will only be formatted and
 			logged "steps" times, evenly spaced thru n_max iterations.'''
-	steps = min(n_max, steps)
+	steps, ts_start = min(n_max, steps), time.time()
 	step_n = steps and n_max / steps
-	msg_tpl = '[{{}}] Step {{:>{0}.0f}} / {{:{0}d}}{{}}'.format(len(str(steps)))
+	msg_tpl = ( '[{{}}] Step {{:>{0}.0f}}'
+		' / {{:{0}d}} {{:02,.0f}}.{{:02,.0f}}s{{}}' ).format(len(str(steps)))
 	def _progress_iter_coro(n):
 		while True:
 			dn_msg = yield
@@ -62,7 +63,9 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 				if msg:
 					if not isinstance(msg, str): msg = msg[0].format(*msg[1:])
 					msg = ': {}'.format(msg)
-				log.debug(msg_tpl, prefix, n / step_n, steps, msg or '')
+				ts_delta = time.time() - ts_start
+				ts_delta_est = (n_max - n) / (n / ts_delta)
+				log.debug(msg_tpl, prefix, n / step_n, steps, ts_delta, ts_delta_est, msg or '')
 	coro = _progress_iter_coro(n)
 	next(coro)
 	return coro
@@ -305,21 +308,24 @@ class DTDtoGTFS:
 	def populate_stops(self):
 		# XXX: check if there are locations without crs code and what that means
 		# XXX: convert physical_station eastings/northings to long/lat
+		self.log.debug('Populating gtfs.stops table...')
 		self.q('''
 			INSERT INTO gtfs.stops
 				( stop_id, stop_code, stop_name, stop_desc,
 					stop_timezone, location_type, wheelchair_boarding )
 				SELECT
 					crs_code, tiploc_code, description, description,
-						"Europe/London", 0, 0
+						"Europe/London" as tz, 0 as loc_type, 0 as acc_wheelchair
 				FROM cif.tiploc
 				WHERE
 					crs_code IS NOT NULL
 					AND description IS NOT NULL''')
 
+
 	def populate_transfers(self):
 		# XXX: better data source / convert to trip+frequences?
 		# XXX: losing the mode here, TUBE, WALK, etc
+		self.log.debug('Populating gtfs.transfers table...')
 		self.q('''
 			INSERT INTO gtfs.transfers
 				SELECT null, origin, destination, 2, duration * 60
@@ -336,21 +342,14 @@ class DTDtoGTFS:
 			Returns "trip_svc_timespans" index of {trip_id: timespans},
 				to populate gtfs.calendar and gtfs.calendar_dates tables after some merging.
 			As gtfs.calendar is still empty, all created trips don't have valid service_id value set.'''
-		# Notes:
-		# - Schedules are ordered by train_uid, so any processed overrides/cancellations
-		#   either duplicate last full entry (stp=P), e.g. if stops or stop times change,
-		#   or simply alter its service timespans, e.g. on cancellation for specified time period.
-		# - Only one gtfs.trip_id is created for same
-		#   trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
-		#
 		# XXX: processing of Z schedules
 		# XXX: processing of associations
 		# XXX: routes are also added here in an ad-hoc manner - need to handle these differently later
+		# XXX: stop times can wrap around?
 
 		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
 
-		# Ordering here includes s.stp_indicator so that all "permanent" schedules
-		#  get processed first, as they don't necessarily come before C and O records.
+		# Schedules are fetched along with stops that get grouped by python code later
 		schedules = f'''
 			SELECT *
 			FROM cif.schedule s
@@ -368,49 +367,45 @@ class DTDtoGTFS:
 			--[ end ]--
 
 			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
-			ORDER BY s.train_uid, s.id'''
+			LEFT JOIN cif.stop_time st ON st.schedule = s.id
+			LEFT JOIN cif.tiploc t ON t.tiploc_code = st.location
+
+			WHERE t.crs_code IS NOT NULL AND t.description IS NOT NULL
+
+			ORDER BY s.train_uid, s.id, st.id'''
 		schedules = re.sub(r'(?s)--\[.*{}\]--'.format('?' if test_run_slice else ''), '', schedules)
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
-		sched_count, schedules = self.q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
+		row_count, schedules = self.q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
 		stp_ordering = 'PONC'
 
+		# Only one gtfs.trip_id is created for
+		#  same trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
 		route_merge_idx = dict() # {(src, dst}: id}
 		trip_merge_idx = dict() # {trip_hash: gtfs.trip_id}
 
-		progress = progress_iter(self.log, 'schedules', sched_count)
-		sched_n, ts_start, self.stats['sched-count'] = 0, time.time(), sched_count
+		# Fetched rows are grouped by:
+		#  - train_uid to apply overrides (stp=O/N/C) in the specified order easily.
+		#  - schedule_id to get clean "process one trip at a time" loop.
+		self.log.debug('Processing {} schedule+stop entries...', row_count)
+		progress = progress_iter(self.log, 'schedules', row_count)
+		for train_uid, train_schedule_stops in it.groupby(schedules, op.attrgetter('train_uid')):
 
-		self.log.debug('Processing {} cif.schedule entries...', sched_count)
-		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
-
-			# Schedules are grouped by train_uid here to apply overrides (stp=O/N/C) easily
 			# Overlays are ordered by stp=P/O/N/C (and then schedule.id) in case of any overlaps
 			schedule_overlays = list()
-			for s in train_schedules:
-				if s.stp_indicator not in stp_ordering:
-					self.log.error( 'Skipping schedule entry with'
-						' unrecognized stp_indicator value {!r}: {}', s.stp_indicator, s )
-				else: schedule_overlays.append(s)
-			schedule_overlays.sort(key=lambda s: (stp_ordering.index(s.stp_indicator), s.id))
+			for schedule_id, schedule_stops in it.groupby(train_schedule_stops, op.attrgetter('id')):
+				stops = list(schedule_stops)
+				if stops[0].stp_indicator not in stp_ordering:
+					self.log.error( 'Skipping schedule entry with unrecognized'
+						' stp_indicator value {!r}: {}', stops[0].stp_indicator, stops[0] )
+				else: schedule_overlays.append(stops)
+			schedule_overlays.sort( key=lambda stops:
+				(stp_ordering.index(stops[0].stp_indicator), stops[0].id) )
 			train_trip_ids = set()
 
-			for s in schedule_overlays:
+			for stops in schedule_overlays:
+				s = stops[0] # used for cif.schedule info, which is same for all rows in "stops"
 
-				# Notes on gtfs.trips:
-				# - Trips are considered equal (via trip_hash) for gtfs purposes
-				#   when it's same cif.train_uid and same stops at the same days/times.
-				# - cif.train_uid does not uniquely identify sequence of gtfs.stops (places),
-				#   even for stp_indicator=P schedules only, for example train_uid=W34606
-				# - If additional metadata will be added to gtfs.trips,
-				#   might be necessary to hash it as well, or just get rid of dedup here.
-
-				### Tracking of progress and stats
-
-				ts_delta, sched_n = time.time() - ts_start, sched_n + 1
-				ts_delta_est = (sched_count - sched_n) / (sched_n / ts_delta)
-				progress.send([
-					'{1:02,.0f}.{2:02,.0f}s trips={0:,}',
-					len(trip_svc_timespans), ts_delta, ts_delta_est ])
+				self.stats['sched-count'] += 1
 				self.stats[f'sched-entry-{s.stp_indicator}'] += 1
 				self.stats_by_train[s.train_uid][f'stp-{s.stp_indicator}'] += 1
 
@@ -448,24 +443,17 @@ class DTDtoGTFS:
 
 				### Processing for trip stops
 
-				stops = list(self.q('''
-					SELECT * FROM cif.stop_time st
-					JOIN cif.tiploc t ON t.tiploc_code = st.location
-					JOIN gtfs.stops s ON t.crs_code = s.stop_id
-					WHERE schedule = %s
-					ORDER BY
-						public_arrival_time, scheduled_arrival_time,
-						public_departure_time, scheduled_departure_time''', s.id))
-				if not stops:
-					# XXX: there are quite a lot of these - check what these represent
+				if s.location is None or s.tiploc_code is None:
 					# self.log.info('Skipping schedule with no usable stops: {}', s)
 					self.stats['sched-without-stops'] += 1
+					progress.send(['trips={:,}', len(trip_svc_timespans)])
 					continue
 
 				trip_hash, trip_stops = [s.train_uid], list()
 
 				# XXX: time conversions - DTD->GTFS and late->next-day
 				for n, st in enumerate(stops, 1):
+					progress.send(['trips={:,}', len(trip_svc_timespans)])
 
 					public_stop = st.public_arrival_time or st.public_departure_time
 					if public_stop:
@@ -478,7 +466,7 @@ class DTDtoGTFS:
 					ts_arr, ts_dep = ts_arr or ts_dep, ts_dep or ts_arr # origin/termination stops
 
 					trip_stops.append((st, pickup_type, ts_arr, ts_dep))
-					trip_hash.append(( st.stop_id,
+					trip_hash.append(( st.crs_code,
 						ts_arr and ts_arr.total_seconds(), ts_dep and ts_dep.total_seconds() ))
 
 				### Trip deduplication
@@ -516,7 +504,7 @@ class DTDtoGTFS:
 					self.insert( 'gtfs.stop_times',
 						trip_id=trip_id, pickup_type=int(pickup_type),
 						arrival_time=ts_arr, departure_time=ts_dep,
-						stop_id=st.stop_id, stop_sequence=n, )
+						stop_id=st.crs_code, stop_sequence=n, )
 				trip_svc_timespans[trip_id].append(svc_span)
 				train_trip_ids.add(trip_id)
 
