@@ -384,10 +384,10 @@ class DTDtoGTFS:
 		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
 			# Schedules are grouped by train_uid here to apply overrides (stp=O/N/C) easily
 
-			# For processing/ordering stp=P/O/N/C entries in that order on top of each other
+			# For processing stp=P/O/N/C entries in that order on top of each other
 			train_schedules = list(train_schedules)
 			try:
-				train_schedules = sorted( train_schedules,
+				train_schedules.sort(
 					key=lambda s: (stp_ordering.index(s.stp_indicator), s.id) )
 			except IndexError:
 				for s in train_schedules:
