@@ -208,8 +208,8 @@ class DTDtoGTFS:
 
 	def __init__( self,
 			db_cif, db_gtfs, conn_opts_base, bank_holidays,
-			db_gtfs_schema=None, db_gtfs_mem=None ):
-		self.db_cif, self.db_gtfs = db_cif, db_gtfs
+			db_gtfs_schema=None, db_gtfs_mem=None, db_noop=False ):
+		self.db_cif, self.db_gtfs, self.db_noop = db_cif, db_gtfs, db_noop
 		self.db_gtfs_schema, self.db_gtfs_mem = db_gtfs_schema, db_gtfs_mem
 		self.conn_opts_base, self.bank_holidays = conn_opts_base, bank_holidays
 		self.log, self.log_sql = get_logger('dtd2gtfs'), get_logger('dtd2gtfs.sql')
@@ -248,6 +248,7 @@ class DTDtoGTFS:
 
 
 	def q(self, q, *params, fetch=True):
+		if self.db_noop and re.search(r'(?i)^\s*(insert|delete|update)', q): return
 		with self.db.cursor(NTCursor) as cur:
 			# if self.log_sql.isEnabledFor(logging.DEBUG):
 			# 	p_log = str(params)
@@ -259,6 +260,7 @@ class DTDtoGTFS:
 			return cur.fetchall()
 
 	def insert(self, table, **row):
+		if self.db_noop: return
 		row = collections.OrderedDict(row.items())
 		cols, vals = ','.join(row.keys()), ','.join(['%s']*len(row))
 		return self.q( 'INSERT INTO'
@@ -673,9 +675,11 @@ def main(args=None):
 	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
 		help='Do test-run with specified number of randomly-selected trains only.'
 			' This always produces incomplete results, only useful for testing the code quickly.')
-	group.add_argument('-m', '--test-memory-schema', action='store_true',
+	group.add_argument('--test-memory-schema', action='store_true',
 		help='Process schema dump passed to -s/--dst-gtfs-schema'
 			' option and replace table engine with ENGINE=MEMORY.')
+	group.add_argument('--test-no-output', action='store_true',
+		help='Instead of populating destination schema with results, just drop these on the floor.')
 	group.add_argument('-v', '--verbose', action='store_true',
 		help='Print info about non-critical errors and quirks found during conversion.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
@@ -700,7 +704,8 @@ def main(args=None):
 		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
 	with DTDtoGTFS(
 			opts.src_cif_db, opts.dst_gtfs_db, mysql_conn_opts, bank_holidays,
-			db_gtfs_schema=opts.dst_gtfs_schema, db_gtfs_mem=opts.test_memory_schema ) as conv:
+			db_gtfs_schema=opts.dst_gtfs_schema, db_gtfs_mem=opts.test_memory_schema,
+			db_noop=opts.test_no_output ) as conv:
 		conv.run(opts.test_train_limit)
 
 if __name__ == '__main__': sys.exit(main())
