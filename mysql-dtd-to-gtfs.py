@@ -311,7 +311,7 @@ class DTDtoGTFS:
 
 		## Step-3: Store assigned service_id to gtfs.trips,
 		##  duplicating trip where there's >1 service_id associated with it.
-		if not self.db_noop: self.assign_service_id_to_trips(trip_svc_ids)
+		self.assign_service_id_to_trips(trip_svc_ids)
 
 		### Done!
 		if self.log.isEnabledFor(logging.DEBUG): self.log_stats()
@@ -608,13 +608,15 @@ class DTDtoGTFS:
 				continue
 			self.q('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id_list[0], trip_id)
 			if len(svc_id_list) > 1:
-				trip, = self.q('SELECT * FROM gtfs.trips WHERE trip_id = %s', trip_id)
-				trip_stops = self.q('SELECT * FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
-				trip, trip_stops = trip._asdict(), list(s._asdict() for s in trip_stops)
+				if not self.db_noop:
+					trip, = self.q('SELECT * FROM gtfs.trips WHERE trip_id = %s', trip_id)
+					trip_stops = self.q('SELECT * FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
+					trip, trip_stops = trip._asdict(), list(s._asdict() for s in trip_stops)
 				self.stats['trip-row-dup'] += 1
 				for svc_id in svc_id_list[1:]:
 					self.stats['trip-row-dup-op'] += 1
 					trip_id = next(trip_id_seq)
+					if self.db_noop: continue
 					trip.update(id=None, trip_id=trip_id)
 					self.insert('gtfs.trips', **trip)
 					for st in trip_stops:
