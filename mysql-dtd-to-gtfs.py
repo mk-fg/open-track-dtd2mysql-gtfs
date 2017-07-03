@@ -115,6 +115,7 @@ GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0
 GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 
 
+class GTFSTimespanInvalid(Exception): pass
 class GTFSTimespanEmpty(Exception): pass
 
 @ft.total_ordering
@@ -131,6 +132,8 @@ class GTFSTimespan:
 		self.except_days = frozenset(filter(
 			lambda day: not (start <= day <= end and self.weekdays[day.weekday()]),
 			except_days or list() )) # filters-out redundant exceptions that weren't valid anyway
+		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
+		except StopIteration: raise GTFSTimespanInvalid()
 		self._hash_tuple = self.start, self.end, self.weekdays, self.except_days
 
 	def __lt__(self, span): return self._hash_tuple < span._hash_tuple
@@ -140,12 +143,19 @@ class GTFSTimespan:
 	@property
 	def weekday_dict(self): return dict(zip(self.weekday_order, self.weekdays))
 
-	def date_iter(self):
-		day, date_list = self.start, list()
-		while day <= self.end:
-			if ( self.weekdays[day.weekday()]
-				and day not in self.except_days ): yield day
-			day += self.one_day
+	def date_iter(self, reverse=False):
+		'Iterates over all valid (non-weekend/excluded) dates in this timespan.'
+		day = self.start if not reverse else self.end
+		service_day_check = ( lambda d:
+			self.weekdays[d.weekday()] and d not in self.except_days )
+		if not reverse:
+			while day <= self.end:
+				if service_day_check(day): yield day
+				day += self.one_day
+		else:
+			while day >= self.start:
+				if service_day_check(day): yield day
+				day -= self.one_day
 
 	def merge(self, span, exc_days_to_split=5):
 		'''Return new merged timespan or None if it's not possible.
@@ -199,6 +209,8 @@ class GTFSTimespan:
 			return [
 				GTFSTimespan(start, day_from - self.one_day, self.except_days, self.weekdays),
 				GTFSTimespan(day_to + self.one_day, self.end, self.except_days, self.weekdays) ]
+		if day_from <= self.start and day_to >= self.end: # full overlap
+			raise GTFSTimespanEmpty('Empty timespan result')
 		if day_from <= start: start = day_to + self.one_day
 		if day_to >= end: end = day_from - self.one_day
 		return [GTFSTimespan(start, end, self.except_days, self.weekdays)]
@@ -299,7 +311,7 @@ class DTDtoGTFS:
 
 		## Step-3: Store assigned service_id to gtfs.trips,
 		##  duplicating trip where there's >1 service_id associated with it.
-		self.assign_service_id_to_trips(trip_svc_ids)
+		if not self.db_noop: self.assign_service_id_to_trips(trip_svc_ids)
 
 		### Done!
 		if self.log.isEnabledFor(logging.DEBUG): self.log_stats()
