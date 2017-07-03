@@ -368,10 +368,11 @@ class DTDtoGTFS:
 			--[ end ]--
 
 			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
-			ORDER BY s.train_uid, s.stp_indicator != 'P', s.id'''
+			ORDER BY s.train_uid, s.id'''
 		schedules = re.sub(r'(?s)--\[.*{}\]--'.format('?' if test_run_slice else ''), '', schedules)
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
 		sched_count, schedules = self.q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
+		stp_ordering = 'PONC'
 
 		route_merge_idx = dict() # {(src, dst}: id}
 		trip_merge_idx = dict() # {trip_hash: gtfs.trip_id}
@@ -381,14 +382,22 @@ class DTDtoGTFS:
 
 		self.log.debug('Processing {} cif.schedule entries...', sched_count)
 		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
-			# Schedules are grouped by train_uid here to apply overrides (stp=O, stp=C) easily
+			# Schedules are grouped by train_uid here to apply overrides (stp=O/N/C) easily
 
-			train_trip_ids = set() # for processing stp=O and stp=C entries
+			# For processing/ordering stp=P/O/N/C entries in that order on top of each other
+			train_schedules = list(train_schedules)
+			try:
+				train_schedules = sorted( train_schedules,
+					key=lambda s: (stp_ordering.index(s.stp_indicator), s.id) )
+			except IndexError:
+				for s in train_schedules:
+					if s.stp_indicator not in stp_ordering: break
+				else: raise
+				self.log.error( 'Skipping schedule entry with'
+					' unrecognized stp_indicator value {!r}: {}', s.stp_indicator, s )
+			train_trip_ids = set()
 
 			for s in train_schedules:
-				if s.stp_indicator not in 'POC':
-					self.log.info('Skipping unrecognized stp_indicator value: {!r}', s.stp_indicator)
-					continue
 
 				# Notes on gtfs.trips:
 				# - Trips are considered equal (via trip_hash) for gtfs purposes
@@ -514,11 +523,11 @@ class DTDtoGTFS:
 				trip_svc_timespans[trip_id].append(svc_span)
 				train_trip_ids.add(trip_id)
 
-				### Special processing for stp=O (VAR/overlay) entries
+				### Special processing for stp=O/N (O/VAR/overlay, N/STP/Short-Term-Planned) entries
 				# If this trip is an overlay for previous schedule(s),
 				#  remove all runs_from-run_to days covered in its timespan from there.
 
-				if s.stp_indicator == 'O':
+				if s.stp_indicator in 'ON':
 					span_overlay_applied = False # only for quirk-tracking in stats below
 					for trip_id in train_trip_ids.difference([trip_id]): # so it'd never cancel itself
 						spans_new = list()
