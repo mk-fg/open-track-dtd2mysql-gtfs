@@ -206,8 +206,11 @@ class DTDtoGTFS:
 	# Forces errors on truncated values and issues in multi-row inserts
 	sql_mode = 'strict_all_tables'
 
-	def __init__(self, db_cif, db_gtfs, conn_opts_base, bank_holidays):
+	def __init__( self,
+			db_cif, db_gtfs, conn_opts_base, bank_holidays,
+			db_gtfs_schema=None, db_gtfs_mem=None ):
 		self.db_cif, self.db_gtfs = db_cif, db_gtfs
+		self.db_gtfs_schema, self.db_gtfs_mem = db_gtfs_schema, db_gtfs_mem
 		self.conn_opts_base, self.bank_holidays = conn_opts_base, bank_holidays
 		self.log, self.log_sql = get_logger('dtd2gtfs'), get_logger('dtd2gtfs.sql')
 
@@ -225,6 +228,19 @@ class DTDtoGTFS:
 			mode_flags = set(map(str.strip, dict(cur.fetchall())['sql_mode'].lower().split(',')))
 			mode_flags.update(self.sql_mode.lower().split())
 			cur.execute('set sql_mode = %s', [','.join(mode_flags)])
+
+		if self.db_gtfs_schema:
+			self.log.debug( 'Initializing gtfs database'
+				' (name={}, memory-engine={}) tables...', self.db_gtfs, bool(self.db_gtfs_mem) )
+			with open(self.db_gtfs_schema) as src: schema = src.read()
+			if self.db_gtfs_mem:
+				schema = re.sub(r'(?i)\bENGINE=\S+\b', 'ENGINE=MEMORY', schema)
+			with self.db.cursor() as cur:
+				cur.execute(f'drop database if exists {self.db_gtfs}')
+				cur.execute(f'create database {self.db_gtfs}')
+				cur.execute(f'use {self.db_gtfs}')
+				cur.execute(schema)
+
 		return self
 
 	def __exit__(self, *exc):
@@ -352,6 +368,7 @@ class DTDtoGTFS:
 			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
 			ORDER BY s.train_uid, s.stp_indicator != 'P', s.id'''
 		schedules = re.sub(r'(?s)--\[.*{}\]--'.format('?' if test_run_slice else ''), '', schedules)
+		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
 		sched_count, schedules = self.q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
 
 		route_merge_idx = dict() # {(src, dst}: id}
@@ -629,6 +646,11 @@ def main(args=None):
 	group.add_argument('-d', '--dst-gtfs-db',
 		default='gtfs', metavar='db-name',
 		help='Database name to store GTFS feed to (default: %(default)s).')
+	group.add_argument('-i', '--dst-gtfs-schema',
+		metavar='path-to-schema.sql', nargs='?', const='doc/db-schema-gtfs.sql',
+		help='Create/init destination database with schema from specified .sql file.'
+			' If such database already exists, it will be dropped first!'
+			' Default schema file path (if not specified as optional argument): %(default)s.')
 	group.add_argument('-f', '--mycnf-file',
 		metavar='path', default=str(pathlib.Path('~/.my.cnf').expanduser()),
 		help='Alternative ~/.my.cnf file to use to read all connection parameters from.'
@@ -651,6 +673,9 @@ def main(args=None):
 	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
 		help='Do test-run with specified number of randomly-selected trains only.'
 			' This always produces incomplete results, only useful for testing the code quickly.')
+	group.add_argument('-m', '--test-memory-schema', action='store_true',
+		help='Process schema dump passed to -s/--dst-gtfs-schema'
+			' option and replace table engine with ENGINE=MEMORY.')
 	group.add_argument('-v', '--verbose', action='store_true',
 		help='Print info about non-critical errors and quirks found during conversion.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
@@ -674,8 +699,8 @@ def main(args=None):
 	mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
 		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
 	with DTDtoGTFS(
-			opts.src_cif_db, opts.dst_gtfs_db,
-			mysql_conn_opts, bank_holidays ) as conv:
+			opts.src_cif_db, opts.dst_gtfs_db, mysql_conn_opts, bank_holidays,
+			db_gtfs_schema=opts.dst_gtfs_schema, db_gtfs_mem=opts.test_memory_schema ) as conv:
 		conv.run(opts.test_train_limit)
 
 if __name__ == '__main__': sys.exit(main())
