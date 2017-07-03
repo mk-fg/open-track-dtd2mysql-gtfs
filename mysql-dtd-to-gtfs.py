@@ -382,22 +382,19 @@ class DTDtoGTFS:
 
 		self.log.debug('Processing {} cif.schedule entries...', sched_count)
 		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
-			# Schedules are grouped by train_uid here to apply overrides (stp=O/N/C) easily
 
-			# For processing stp=P/O/N/C entries in that order on top of each other
-			train_schedules = list(train_schedules)
-			try:
-				train_schedules.sort(
-					key=lambda s: (stp_ordering.index(s.stp_indicator), s.id) )
-			except IndexError:
-				for s in train_schedules:
-					if s.stp_indicator not in stp_ordering: break
-				else: raise
-				self.log.error( 'Skipping schedule entry with'
-					' unrecognized stp_indicator value {!r}: {}', s.stp_indicator, s )
+			# Schedules are grouped by train_uid here to apply overrides (stp=O/N/C) easily
+			# Overlays are ordered by stp=P/O/N/C (and then schedule.id) in case of any overlaps
+			schedule_overlays = list()
+			for s in train_schedules:
+				if s.stp_indicator not in stp_ordering:
+					self.log.error( 'Skipping schedule entry with'
+						' unrecognized stp_indicator value {!r}: {}', s.stp_indicator, s )
+				else: schedule_overlays.append(s)
+			schedule_overlays.sort(key=lambda s: (stp_ordering.index(s.stp_indicator), s.id))
 			train_trip_ids = set()
 
-			for s in train_schedules:
+			for s in schedule_overlays:
 
 				# Notes on gtfs.trips:
 				# - Trips are considered equal (via trip_hash) for gtfs purposes
