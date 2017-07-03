@@ -367,15 +367,10 @@ class DTDtoGTFS:
 			--[ end ]--
 
 			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
-			LEFT JOIN cif.stop_time st ON st.schedule = s.id
-			LEFT JOIN cif.tiploc t ON t.tiploc_code = st.location
-
-			WHERE t.crs_code IS NOT NULL AND t.description IS NOT NULL
-
-			ORDER BY s.train_uid, s.id, st.id'''
+			ORDER BY s.train_uid, s.id'''
 		schedules = re.sub(r'(?s)--\[.*{}\]--'.format('?' if test_run_slice else ''), '', schedules)
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
-		row_count, schedules = self.q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
+		sched_count, schedules = self.q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
 		stp_ordering = 'PONC'
 
 		# Only one gtfs.trip_id is created for
@@ -386,25 +381,22 @@ class DTDtoGTFS:
 		# Fetched rows are grouped by:
 		#  - train_uid to apply overrides (stp=O/N/C) in the specified order easily.
 		#  - schedule_id to get clean "process one trip at a time" loop.
-		self.log.debug('Processing {} schedule+stop entries...', row_count)
-		progress = progress_iter(self.log, 'schedules', row_count)
-		for train_uid, train_schedule_stops in it.groupby(schedules, op.attrgetter('train_uid')):
+		self.log.debug('Processing {} cif.schedule entries...', sched_count)
+		progress = progress_iter(self.log, 'schedules', sched_count)
+		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
 
 			# Overlays are ordered by stp=P/O/N/C (and then schedule.id) in case of any overlaps
 			schedule_overlays = list()
-			for schedule_id, schedule_stops in it.groupby(train_schedule_stops, op.attrgetter('id')):
-				stops = list(schedule_stops)
-				if stops[0].stp_indicator not in stp_ordering:
-					self.log.error( 'Skipping schedule entry with unrecognized'
-						' stp_indicator value {!r}: {}', stops[0].stp_indicator, stops[0] )
-				else: schedule_overlays.append(stops)
-			schedule_overlays.sort( key=lambda stops:
-				(stp_ordering.index(stops[0].stp_indicator), stops[0].id) )
+			for s in train_schedules:
+				if s.stp_indicator not in stp_ordering:
+					self.log.error( 'Skipping schedule entry with'
+						' unrecognized stp_indicator value {!r}: {}', s.stp_indicator, s )
+				else: schedule_overlays.append(s)
+			schedule_overlays.sort(key=lambda s: (stp_ordering.index(s.stp_indicator), s.id))
 			train_trip_ids = set()
 
-			for stops in schedule_overlays:
-				s = stops[0] # used for cif.schedule info, which is same for all rows in "stops"
-
+			for s in schedule_overlays:
+				progress.send(['trips={:,}', len(trip_svc_timespans)])
 				self.stats['sched-count'] += 1
 				self.stats[f'sched-entry-{s.stp_indicator}'] += 1
 				self.stats_by_train[s.train_uid][f'stp-{s.stp_indicator}'] += 1
@@ -442,19 +434,24 @@ class DTDtoGTFS:
 					continue
 
 				### Processing for trip stops
-
-				if s.location is None or s.tiploc_code is None:
+				# XXX: make sure ordering here is correct
+				stops = list(self.q('''
+					SELECT * FROM cif.stop_time st
+					JOIN cif.tiploc t ON t.tiploc_code = st.location
+					WHERE
+						schedule = %s
+						AND crs_code IS NOT NULL
+						AND description IS NOT NULL
+					ORDER BY st.id''', s.id))
+				if not stops:
 					# self.log.info('Skipping schedule with no usable stops: {}', s)
 					self.stats['sched-without-stops'] += 1
-					progress.send(['trips={:,}', len(trip_svc_timespans)])
 					continue
 
 				trip_hash, trip_stops = [s.train_uid], list()
 
 				# XXX: time conversions - DTD->GTFS and late->next-day
 				for n, st in enumerate(stops, 1):
-					progress.send(['trips={:,}', len(trip_svc_timespans)])
-
 					public_stop = st.public_arrival_time or st.public_departure_time
 					if public_stop:
 						pickup_type = GTFSPickupType.regular
