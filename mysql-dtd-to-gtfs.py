@@ -2,10 +2,20 @@
 
 import itertools as it, operator as op, functools as ft
 import os, sys, contextlib, logging, pathlib, re
-import collections, secrets, enum, math, time
+import collections, enum, math, time
 import datetime, calendar, locale
 
 import MySQLdb, MySQLdb.cursors # https://mysqlclient.readthedocs.io/
+
+
+## Compatibility stuff for pypy3-5.8.0/python-3.5.x
+if sys.version_info >= (3, 6, 0): import secrets
+else:
+	import base64
+	def token_urlsafe(chars=4):
+		return base64.urlsafe_b64encode(
+			os.urandom(chars * 6 // 8 + 1) ).rstrip(b'=').decode()[:chars]
+	secrets = type('module', (object,), dict(token_urlsafe=token_urlsafe))
 
 
 class LogMessage(object):
@@ -68,7 +78,7 @@ class NTCursor(MySQLdb.cursors.Cursor):
 	def tuple_for_row(row):
 		if isinstance(row, str): return lambda *a: tuple(a)
 		row = list(k.replace('.', ' ').rsplit(None, 1)[-1] for k in row)
-		return collections.namedtuple(f'Row', row, rename=True)
+		return collections.namedtuple('Row', row, rename=True)
 
 	@classmethod
 	def with_keys(cls, row):
@@ -235,7 +245,7 @@ class DTDtoGTFS:
 	def insert(self, table, **row):
 		row = collections.OrderedDict(row.items())
 		cols, vals = ','.join(row.keys()), ','.join(['%s']*len(row))
-		return self.q( f'INSERT INTO'
+		return self.q( 'INSERT INTO'
 			f' {table} ({cols}) VALUES ({vals})', *row.values(), fetch=False )
 
 

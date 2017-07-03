@@ -19,7 +19,8 @@ Under heavy development, nothing works yet.
 Usage
 -----
 
-Needs Python-3.6+ and `mysqlclient module <https://mysqlclient.readthedocs.io/>`_.
+Needs Python-3.6+ (or pypy3-5.8.0+) and
+`mysqlclient module <https://mysqlclient.readthedocs.io/>`_.
 
 Simple example: ``./mysql-dtd-to-gtfs.py -v``
 
