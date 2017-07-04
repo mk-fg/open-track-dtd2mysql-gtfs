@@ -379,39 +379,32 @@ class DTDtoGTFS:
 			--[ end ]--
 
 			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
-			ORDER BY s.train_uid, s.id'''
+			ORDER BY s.train_uid, FIELD(s.stp_indicator, "P", "N", "O", "C"), s.id'''
 		schedules = re.sub(r'(?s)--\[.*{}\]--'.format('?' if test_run_slice else ''), '', schedules)
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
 		sched_count, schedules = self.q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
-		stp_ordering = 'PONC'
 
 		# Only one gtfs.trip_id is created for
 		#  same trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
 		route_merge_idx = dict() # {(src, dst}: id}
 		trip_merge_idx = dict() # {trip_hash: gtfs.trip_id}
 
-		# Fetched rows are grouped by:
-		#  - train_uid to apply overrides (stp=O/N/C) in the specified order easily.
-		#  - schedule_id to get clean "process one trip at a time" loop.
 		self.log.debug('Processing {} cif.schedule entries...', sched_count)
 		progress = progress_iter(self.log, 'schedules', sched_count)
 		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
 
-			# Overlays are ordered by stp=P/O/N/C (and then schedule.id) in case of any overlaps
-			schedule_overlays = list()
-			for s in train_schedules:
-				if s.stp_indicator not in stp_ordering:
-					self.log.error( 'Skipping schedule entry with'
-						' unrecognized stp_indicator value {!r}: {}', s.stp_indicator, s )
-				else: schedule_overlays.append(s)
-			schedule_overlays.sort(key=lambda s: (stp_ordering.index(s.stp_indicator), s.id))
 			train_trip_ids = set()
 
-			for s in schedule_overlays:
+			for s in train_schedules:
 				progress.send(['trips={:,}', len(trip_svc_timespans)])
 				self.stats['sched-count'] += 1
 				self.stats[f'sched-entry-{s.stp_indicator}'] += 1
 				self.stats_by_train[s.train_uid][f'stp-{s.stp_indicator}'] += 1
+
+				if s.stp_indicator not in 'PONC':
+					self.log.warning( 'Skipping schedule entry with'
+						' unrecognized stp_indicator value {!r}: {}', s.stp_indicator, s )
+					continue
 
 				### Service timespan for this schedule
 
