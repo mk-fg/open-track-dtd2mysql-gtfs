@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-import os, sys, contextlib, logging, pathlib, re
+import os, sys, contextlib, logging, pathlib, re, warnings
 import collections, enum, math, time
 import datetime, calendar, locale
 
@@ -231,6 +231,10 @@ class DTDtoGTFS:
 		# Reset locale for consistency in calendar and such
 		locale_prev = locale.setlocale(locale.LC_ALL, '')
 		self.ctx.callback(locale.setlocale, locale.LC_ALL, locale_prev)
+
+		# Warnings from pymysql about buffered results and such are all bugs
+		self.ctx.enter_context(warnings.catch_warnings())
+		warnings.filterwarnings('error')
 
 		self.db = self.ctx.enter_context(
 			contextlib.closing(pymysql.connect(charset='utf8mb4', **self.conn_opts_base)) )
