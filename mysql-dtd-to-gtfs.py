@@ -122,12 +122,11 @@ class GTFSTimespan:
 		assert all(isinstance(d, datetime.date) for d in it.chain([start, end], except_days or list()))
 		self.start, self.end = start, end
 		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
-		self.weekdays = tuple(map(int, weekdays))
-		self.except_days = frozenset(filter(
-			lambda day: start <= day <= end and self.weekdays[day.weekday()],
-			except_days or list() )) # filters-out redundant exceptions that weren't valid anyway
+		self.weekdays, self.except_days = tuple(map(int, weekdays)), set(except_days or list())
 		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
 		except StopIteration: raise GTFSTimespanInvalid(str(self))
+		self.except_days = frozenset(filter(
+			lambda day: start <= day <= end and self.weekdays[day.weekday()], self.except_days ))
 		self._hash_tuple = self.start, self.end, self.weekdays, self.except_days
 
 	def __lt__(self, span): return self._hash_tuple < span._hash_tuple
@@ -170,8 +169,8 @@ class GTFSTimespan:
 				s1.start, max(s1.end, s2.end),
 				s1.except_days | s2.except_days, weekdays )
 		if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split:
-			day, except_days = s1.end, set(s1.except_days | s2.except_days)
-			while day <= s2.start:
+			day, except_days = s1.end + self.one_day, set(s1.except_days | s2.except_days)
+			while day < s2.start:
 				if not weekdays[day.weekday()]: except_days.add(day)
 				day += self.one_day
 			return GTFSTimespan(s1.start, max(s1.end, s2.end), except_days, weekdays)
