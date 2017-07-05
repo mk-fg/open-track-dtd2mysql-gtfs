@@ -226,6 +226,7 @@ class DTDtoGTFS:
 		self.log, self.log_sql = get_logger('dtd2gtfs'), get_logger('dtd2gtfs.sql')
 
 	def __enter__(self):
+		self.db_conns, self.db_cursors = dict(), dict()
 		self.ctx = contextlib.ExitStack()
 
 		# Reset locale for consistency in calendar and such
@@ -236,15 +237,7 @@ class DTDtoGTFS:
 		self.ctx.enter_context(warnings.catch_warnings())
 		warnings.filterwarnings('error')
 
-		self.db = self.ctx.enter_context(
-			contextlib.closing(pymysql.connect(charset='utf8mb4', **self.conn_opts_base)) )
-		c = self.c = self.ctx.enter_context(self.db.cursor(NTCursor))
-
-		c.execute('show variables like %s', ['sql_mode'])
-		mode_flags = set(map(str.strip, dict(c.fetchall())['sql_mode'].lower().split(',')))
-		mode_flags.update(self.sql_mode.lower().split())
-		c.execute('set sql_mode = %s', [','.join(mode_flags)])
-
+		c = self.c = self.connect()
 		if self.db_gtfs_schema:
 			self.log.debug( 'Initializing gtfs database'
 				' (name={}, memory-engine={}) tables...', self.db_gtfs, bool(self.db_gtfs_mem) )
@@ -256,35 +249,54 @@ class DTDtoGTFS:
 				c.execute(f'create database {self.db_gtfs}')
 				c.execute(f'use {self.db_gtfs}')
 				c.execute(schema)
-				self.db.commit()
+				self.commit(force=True)
 
 		return self
 
 	def __exit__(self, *exc):
 		if self.ctx: self.ctx = self.ctx.close()
+		self.db_conns = self.db_cursors = None
 
 
-	def q(self, q, *params, fetch=True):
+	def connect(self, key=None):
+		assert key not in self.db_conns, key
+		conn = self.db_conns[key] = self.ctx.enter_context(
+			contextlib.closing(pymysql.connect(charset='utf8mb4', **self.conn_opts_base)) )
+		c = self.db_cursors[key] = self.ctx.enter_context(conn.cursor(NTCursor))
+		c.execute('show variables like %s', ['sql_mode'])
+		mode_flags = set(map(str.strip, dict(c.fetchall())['sql_mode'].lower().split(',')))
+		mode_flags.update(self.sql_mode.lower().split())
+		c.execute('set sql_mode = %s', [','.join(mode_flags)])
+		return c
+
+	def q(self, q, *params, fetch=True, c=None):
 		if self.db_noop and re.search(r'(?i)^\s*(insert|delete|update)', q): return
 		# if self.log_sql.isEnabledFor(logging.DEBUG):
 		# 	p_log = str(params)
 		# 	if len(p_log) > 150: p_log = f'{p_log[:150]}...[len={len(p_log)}]'
 		# 	self.log_sql.debug('{!r} {}', ' '.join(q.split()), p_log)
-		self.c.execute(q, params)
-		if not fetch: return self.c.lastrowid
-		elif callable(fetch): return fetch(self.c)
-		return self.c.fetchall()
+		c = self.c if not c else (self.db_cursors.get(c) or self.connect(c))
+		c.execute(q, params)
+		if not fetch: return c.lastrowid
+		elif callable(fetch): return fetch(c)
+		return c.fetchall()
+
+	def qb(self, q, *params, c=None, fetch=True, **kws):
+		'Query with buffered results.'
+		res = self.q(q, *params, c=c or 'exec', fetch=fetch, **kws)
+		return res if not fetch else list(res)
 
 	def insert(self, table, **row):
 		if self.db_noop: return
 		row = collections.OrderedDict(row.items())
 		cols, vals = ','.join(row.keys()), ','.join(['%s']*len(row))
-		return self.q( 'INSERT INTO'
-			f' {table} ({cols}) VALUES ({vals})', *row.values(), fetch=False )
+		return self.qb(
+			f'INSERT INTO {table} ({cols}) VALUES ({vals})',
+			*row.values(), fetch=False )
 
-	def commit(self):
-		if self.db_noop or self.db_nocommit: return
-		self.db.commit()
+	def commit(self, force=False):
+		if not force and (self.db_noop or self.db_nocommit): return
+		for conn in self.db_conns.values(): conn.commit()
 
 
 	def run(self, test_run_slice=None):
@@ -327,7 +339,7 @@ class DTDtoGTFS:
 		# XXX: check if there are locations without crs code and what that means
 		# XXX: convert physical_station eastings/northings to long/lat
 		self.log.debug('Populating gtfs.stops table...')
-		self.q('''
+		self.qb('''
 			INSERT INTO gtfs.stops
 				( stop_id, stop_code, stop_name, stop_desc,
 					stop_timezone, wheelchair_boarding )
@@ -344,7 +356,7 @@ class DTDtoGTFS:
 		# XXX: better data source / convert to trip+frequences?
 		# XXX: losing the mode here, TUBE, WALK, etc
 		self.log.debug('Populating gtfs.transfers table...')
-		self.q('''
+		self.qb('''
 			INSERT INTO gtfs.transfers
 				SELECT
 					crs_code AS from_stop_id,
@@ -614,15 +626,15 @@ class DTDtoGTFS:
 		self.log.debug('Updating service_id in gtfs.trips table...')
 		for trip_id, svc_id_list in trip_svc_ids.items():
 			if not svc_id_list: # all timespans for trip got cancelled somehow
-				self.q('DELETE FROM gtfs.trips WHERE trip_id = %s', trip_id)
-				self.q('DELETE FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
+				self.qb('DELETE FROM gtfs.trips WHERE trip_id = %s', trip_id)
+				self.qb('DELETE FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
 				self.stats['trip-delete'] += 1
 				continue
-			self.q('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id_list[0], trip_id)
+			self.qb('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id_list[0], trip_id)
 			if len(svc_id_list) > 1:
 				if not self.db_noop:
-					trip, = self.q('SELECT * FROM gtfs.trips WHERE trip_id = %s', trip_id)
-					trip_stops = self.q('SELECT * FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
+					trip, = self.qb('SELECT * FROM gtfs.trips WHERE trip_id = %s', trip_id)
+					trip_stops = self.qb('SELECT * FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
 					trip, trip_stops = trip._asdict(), list(s._asdict() for s in trip_stops)
 				self.stats['trip-row-dup'] += 1
 				for svc_id in svc_id_list[1:]:
