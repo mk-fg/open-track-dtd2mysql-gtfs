@@ -644,8 +644,9 @@ class DTDtoGTFS:
 				v for k,v in train_stats.items() if k != 'stp-P' and k.startswith('stp-') )
 			stats_override_counts.append(sched_override_count)
 			if sched_override_count > 0: self.stats['train-with-override'] += 1
-		self.stats.update({ 'train-override-median':
-			sum(stats_override_counts) / len(stats_override_counts) })
+		if stats_override_counts:
+			self.stats.update({ 'train-override-median':
+				sum(stats_override_counts) / len(stats_override_counts) })
 		log_lines(self.log.debug, ['Stats:', *(
 			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
 			for k,v in sorted(self.stats.items()) )])
