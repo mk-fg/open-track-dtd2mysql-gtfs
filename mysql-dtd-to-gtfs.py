@@ -575,6 +575,7 @@ class DTDtoGTFS:
 				self.insert( 'gtfs.calendar', service_id=svc_id,
 					start_date=span.start, end_date=span.end, **span.weekday_dict )
 				for day in span.except_days:
+					self.stats['svc-except-days'] += 1
 					self.insert( 'gtfs.calendar_dates', service_id=svc_id,
 						date=day, exception_type=int(GTFSExceptionType.removed) )
 
