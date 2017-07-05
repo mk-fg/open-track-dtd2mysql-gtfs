@@ -377,11 +377,7 @@ class DTDtoGTFS:
 		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
 
 		# Schedules are fetched along with stops that get grouped by python code later
-		schedules = f'''
-			SELECT *
-			FROM cif.schedule s
-
-			--[ Random selection used with test_run_slice only ]--
+		train_uid_slice = '' if not test_run_slice else f'''
 			JOIN
 				( SELECT DISTINCT(train_uid) AS train_uid
 					FROM cif.schedule rs
@@ -390,18 +386,17 @@ class DTDtoGTFS:
 						ON rs.id >= rss.id
 					GROUP BY train_uid HAVING COUNT(*) > 0
 					LIMIT {test_run_slice} ) r
-				ON r.train_uid = s.train_uid
-			--[ end ]--
-
+				ON r.train_uid = s.train_uid'''
+		schedules = f'''
+			SELECT *
+			FROM cif.schedule s
+			{train_uid_slice}
 			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
 			LEFT JOIN cif.stop_time st ON st.schedule = s.id
 			LEFT JOIN cif.tiploc t ON t.tiploc_code = st.location
-
 			WHERE t.crs_code IS NOT NULL AND t.description IS NOT NULL
-
 			ORDER BY s.train_uid, FIELD(s.stp_indicator, "P", "N", "O", "C"), s.id, st.id'''
-		schedules = re.sub(r'(?s)--\[.*{}\]--'.format('?' if test_run_slice else ''), '', schedules)
-		(sched_count,), = self.q('SELECT COUNT(*) FROM cif.schedule')
+		(sched_count,), = self.q(f'SELECT COUNT(*) FROM cif.schedule s {train_uid_slice}')
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
 		schedules = self.q(schedules)
 
