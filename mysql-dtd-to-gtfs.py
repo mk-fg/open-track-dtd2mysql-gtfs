@@ -124,10 +124,10 @@ class GTFSTimespan:
 		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
 		self.weekdays = tuple(map(int, weekdays))
 		self.except_days = frozenset(filter(
-			lambda day: not (start <= day <= end and self.weekdays[day.weekday()]),
+			lambda day: start <= day <= end and self.weekdays[day.weekday()],
 			except_days or list() )) # filters-out redundant exceptions that weren't valid anyway
 		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
-		except StopIteration: raise GTFSTimespanInvalid()
+		except StopIteration: raise GTFSTimespanInvalid(str(self))
 		self._hash_tuple = self.start, self.end, self.weekdays, self.except_days
 
 	def __lt__(self, span): return self._hash_tuple < span._hash_tuple
@@ -165,14 +165,14 @@ class GTFSTimespan:
 		s1, s2, weekdays = self, span, self.weekdays
 		if s1 == s2: return s1
 		if s1 > s2: s1, s2 = s2, s1
-		if s1.end <= s2.start: # overlap
+		if s1.end >= s2.start: # overlap
 			return GTFSTimespan(
 				s1.start, max(s1.end, s2.end),
 				s1.except_days | s2.except_days, weekdays )
 		if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split:
 			day, except_days = s1.end, set(s1.except_days | s2.except_days)
 			while day <= s2.start:
-				if weekdays[day.weekday()]: except_days.add(day)
+				if not weekdays[day.weekday()]: except_days.add(day)
 				day += self.one_day
 			return GTFSTimespan(s1.start, max(s1.end, s2.end), except_days, weekdays)
 
@@ -451,10 +451,14 @@ class DTDtoGTFS:
 
 				### Service timespan for this schedule
 
-				svc_span = GTFSTimespan(
-					s.runs_from, s.runs_to,
-					except_days=s.bank_holiday_running and self.bank_holidays,
-					weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order) )
+				try:
+					svc_span = GTFSTimespan(
+						s.runs_from, s.runs_to,
+						except_days=not s.bank_holiday_running and self.bank_holidays,
+						weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order) )
+				except GTFSTimespanInvalid:
+					self.stats['span-empty-sched'] += 1
+					continue
 
 				### Special processing for stp=C (CAN/cancel) entries
 				# Just subtract this "cancelled" timespan from all timespans for train_uid
