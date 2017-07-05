@@ -134,6 +134,11 @@ class GTFSTimespan:
 	def __eq__(self, span): return self._hash_tuple == span._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
 
+	def __str__(self):
+		weekdays = ''.join((str(n) if d else '.') for n,d in enumerate(self.weekdays, 1))
+		except_days = ', '.join(map(str, self.except_days))
+		return f'<TS {weekdays} [{self.start} {self.end}] {{{except_days}}}>'
+
 	@property
 	def weekday_dict(self): return dict(zip(self.weekday_order, self.weekdays))
 
@@ -169,7 +174,7 @@ class GTFSTimespan:
 			while day <= s2.start:
 				if weekdays[day.weekday()]: except_days.add(day)
 				day += self.one_day
-			return GTFSTimespan(s1.start, s2.end, except_days, weekdays)
+			return GTFSTimespan(s1.start, max(s1.end, s2.end), except_days, weekdays)
 
 	def difference(self, span):
 		'''Return new timespan with passed span excluded from it.
