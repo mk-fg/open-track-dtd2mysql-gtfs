@@ -73,7 +73,7 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 it_ngrams = lambda seq, n: zip(*(it.islice(seq, i, None) for i in range(n)))
 
 
-class NTCursor(pymysql.cursors.DictCursor):
+class NTCursor(pymysql.cursors.SSDictCursor):
 	'Returns namedtuple for each row.'
 
 	@staticmethod
@@ -91,6 +91,12 @@ class NTCursor(pymysql.cursors.DictCursor):
 		if row is None: return
 		return ( self._tt(*row) if self._tt else
 			self.tuple_for_row(tuple(self._fields))(*row) )
+
+	def fetchall(self, bs=2**15):
+		while True:
+			rows = self.fetchmany(bs)
+			if not rows: break
+			for row in rows: yield row
 
 
 class ConversionError(Exception): pass
@@ -228,11 +234,12 @@ class DTDtoGTFS:
 
 		self.db = self.ctx.enter_context(
 			contextlib.closing(pymysql.connect(charset='utf8mb4', **self.conn_opts_base)) )
-		with self.db.cursor() as cur:
-			cur.execute('show variables like %s', ['sql_mode'])
-			mode_flags = set(map(str.strip, dict(cur.fetchall())['sql_mode'].lower().split(',')))
-			mode_flags.update(self.sql_mode.lower().split())
-			cur.execute('set sql_mode = %s', [','.join(mode_flags)])
+		c = self.c = self.ctx.enter_context(self.db.cursor(NTCursor))
+
+		c.execute('show variables like %s', ['sql_mode'])
+		mode_flags = set(map(str.strip, dict(c.fetchall())['sql_mode'].lower().split(',')))
+		mode_flags.update(self.sql_mode.lower().split())
+		c.execute('set sql_mode = %s', [','.join(mode_flags)])
 
 		if self.db_gtfs_schema:
 			self.log.debug( 'Initializing gtfs database'
@@ -241,11 +248,10 @@ class DTDtoGTFS:
 			if self.db_gtfs_mem:
 				schema = re.sub(r'(?i)\bENGINE=\S+\b', 'ENGINE=MEMORY', schema)
 			if not self.db_noop:
-				with self.db.cursor() as cur:
-					cur.execute(f'drop database if exists {self.db_gtfs}')
-					cur.execute(f'create database {self.db_gtfs}')
-					cur.execute(f'use {self.db_gtfs}')
-					cur.execute(schema)
+				c.execute(f'drop database if exists {self.db_gtfs}')
+				c.execute(f'create database {self.db_gtfs}')
+				c.execute(f'use {self.db_gtfs}')
+				c.execute(schema)
 				self.db.commit()
 
 		return self
@@ -256,15 +262,14 @@ class DTDtoGTFS:
 
 	def q(self, q, *params, fetch=True):
 		if self.db_noop and re.search(r'(?i)^\s*(insert|delete|update)', q): return
-		with self.db.cursor(NTCursor) as cur:
-			# if self.log_sql.isEnabledFor(logging.DEBUG):
-			# 	p_log = str(params)
-			# 	if len(p_log) > 150: p_log = f'{p_log[:150]}...[len={len(p_log)}]'
-			# 	self.log_sql.debug('{!r} {}', ' '.join(q.split()), p_log)
-			cur.execute(q, params)
-			if not fetch: return cur.lastrowid
-			elif callable(fetch): return fetch(cur)
-			return cur.fetchall()
+		# if self.log_sql.isEnabledFor(logging.DEBUG):
+		# 	p_log = str(params)
+		# 	if len(p_log) > 150: p_log = f'{p_log[:150]}...[len={len(p_log)}]'
+		# 	self.log_sql.debug('{!r} {}', ' '.join(q.split()), p_log)
+		self.c.execute(q, params)
+		if not fetch: return self.c.lastrowid
+		elif callable(fetch): return fetch(self.c)
+		return self.c.fetchall()
 
 	def insert(self, table, **row):
 		if self.db_noop: return
@@ -389,23 +394,35 @@ class DTDtoGTFS:
 			--[ end ]--
 
 			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
-			ORDER BY s.train_uid, FIELD(s.stp_indicator, "P", "N", "O", "C"), s.id'''
+			LEFT JOIN cif.stop_time st ON st.schedule = s.id
+			LEFT JOIN cif.tiploc t ON t.tiploc_code = st.location
+
+			WHERE t.crs_code IS NOT NULL AND t.description IS NOT NULL
+
+			ORDER BY s.train_uid, FIELD(s.stp_indicator, "P", "N", "O", "C"), s.id, st.id'''
 		schedules = re.sub(r'(?s)--\[.*{}\]--'.format('?' if test_run_slice else ''), '', schedules)
+		(sched_count,), = self.q('SELECT COUNT(*) FROM cif.schedule')
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
-		sched_count, schedules = self.q(schedules, fetch=lambda c: (c.rowcount, c.fetchall()))
+		schedules = self.q(schedules)
 
 		# Only one gtfs.trip_id is created for
 		#  same trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
 		route_merge_idx = dict() # {(src, dst}: id}
 		trip_merge_idx = dict() # {trip_hash: gtfs.trip_id}
 
+		# Fetched rows are grouped by:
+		#  - train_uid to apply overrides (stp=O/N/C) in the specified order easily.
+		#  - schedule_id to get clean "process one trip at a time" loop.
 		self.log.debug('Processing {} cif.schedule entries...', sched_count)
 		progress = progress_iter(self.log, 'schedules', sched_count)
-		for train_uid, train_schedules in it.groupby(schedules, op.attrgetter('train_uid')):
+		for train_uid, train_schedule_stops in it.groupby(schedules, op.attrgetter('train_uid')):
 
 			train_trip_ids = set()
 
-			for s in train_schedules:
+			for schedule_id, stops in it.groupby(train_schedule_stops, op.attrgetter('id')):
+				s = next(stops)
+				stops = [s, *stops]
+
 				progress.send(['trips={:,}', len(trip_svc_timespans)])
 				self.stats['sched-count'] += 1
 				self.stats[f'sched-entry-{s.stp_indicator}'] += 1
@@ -450,15 +467,7 @@ class DTDtoGTFS:
 
 				### Processing for trip stops
 				# XXX: make sure ordering here is correct
-				stops = list(self.q('''
-					SELECT * FROM cif.stop_time st
-					JOIN cif.tiploc t ON t.tiploc_code = st.location
-					WHERE
-						schedule = %s
-						AND crs_code IS NOT NULL
-						AND description IS NOT NULL
-					ORDER BY st.id''', s.id))
-				if not stops:
+				if s.location is None or s.tiploc_code is None:
 					# self.log.info('Skipping schedule with no usable stops: {}', s)
 					self.stats['sched-without-stops'] += 1
 					continue
