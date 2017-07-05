@@ -134,7 +134,7 @@ class GTFSTimespan:
 	def __eq__(self, span): return self._hash_tuple == span._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
 
-	def __str__(self):
+	def __repr__(self):
 		weekdays = ''.join((str(n) if d else '.') for n,d in enumerate(self.weekdays, 1))
 		except_days = ', '.join(map(str, self.except_days))
 		return f'<TS {weekdays} [{self.start} {self.end}] {{{except_days}}}>'
@@ -584,21 +584,23 @@ class DTDtoGTFS:
 
 		self.log.debug('Merging service timespans for {} gtfs.trips...', len(trip_svc_timespans))
 		for trip_id, spans in trip_svc_timespans.items():
-			spans = trip_svc_ids[trip_id] = spans.copy()
+			spans = spans_pre = trip_svc_ids[trip_id] = spans.copy()
 
 			### Merge timespans where possible
 			if len(spans) > 1:
-				merged, spans_merged = None, list()
-				for s1, s2 in it_ngrams(sorted(spans), 2):
-					if merged: # s1 was already used in previous merge
-						merged = None
-						continue
-					merged = s1.merge(s2)
-					if merged: self.stats['svc-merge-op'] += 1
-					spans_merged.append(merged or s1)
-				if merged is None: spans_merged.append(s2)
-				if len(spans) != len(spans_merged): self.stats['svc-merge'] += 1
-				spans = trip_svc_ids[trip_id] = spans_merged
+				spans = set(spans)
+				while True:
+					spans_before = len(spans)
+					for s1, s2 in list(it.combinations(spans, 2)):
+						if not spans.issuperset([s1, s2]): continue
+						merged = s1.merge(s2)
+						if merged:
+							spans.difference_update([s1, s2])
+							spans.add(merged)
+							self.stats['svc-merge-op'] += 1
+					if len(spans) == spans_before: break
+				spans = trip_svc_ids[trip_id] = list(spans)
+				if len(spans) != len(spans_pre): self.stats['svc-merge'] += 1
 
 			### Store into gtfs.calendar/gtfs.calendar_dates, assigning service_id to each
 			for n, span in enumerate(spans):
