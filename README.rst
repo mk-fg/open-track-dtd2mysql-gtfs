@@ -20,14 +20,13 @@ Usage
 -----
 
 Needs Python-3.6+ (or pypy3-5.8.0+) and
-`mysqlclient module <https://mysqlclient.readthedocs.io/>`_.
+`pymysql module <https://pymysql.readthedocs.io/>`_.
 
 Simple example: ``./mysql-dtd-to-gtfs.py -v``
 
-As libmysqlclient (via mysqlclient module) is used for db access, most
-MySQL-related parameters should be specified for it via e.g. ~/.my.cnf (or
-alternative client config, passed as -f/--mycnf-file),
-under -g/--mycnf-group section (or default one, if not specified).
+Most MySQL-related parameters should be specified for it via the usual ~/.my.cnf
+(or alternative client config, passed as -f/--mycnf-file), under -g/--mycnf-group
+section (or default one, if not specified).
 
 Source/destination database names can also be specified via commandline
 parameters, as well as a few other logging and debug options.

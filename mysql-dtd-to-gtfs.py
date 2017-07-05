@@ -5,7 +5,7 @@ import os, sys, contextlib, logging, pathlib, re
 import collections, enum, math, time
 import datetime, calendar, locale
 
-import MySQLdb, MySQLdb.cursors # https://mysqlclient.readthedocs.io/
+import pymysql, pymysql.cursors # https://pymysql.readthedocs.io/
 
 
 ## Compatibility stuff for pypy3-5.8.0/python-3.5.x
@@ -73,7 +73,7 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 it_ngrams = lambda seq, n: zip(*(it.islice(seq, i, None) for i in range(n)))
 
 
-class NTCursor(MySQLdb.cursors.Cursor):
+class NTCursor(pymysql.cursors.DictCursor):
 	'Returns namedtuple for each row.'
 
 	@staticmethod
@@ -83,26 +83,14 @@ class NTCursor(MySQLdb.cursors.Cursor):
 		row = list(k.replace('.', ' ').rsplit(None, 1)[-1] for k in row)
 		return collections.namedtuple('Row', row, rename=True)
 
-	@classmethod
-	def with_keys(cls, row):
-		return ft.partial(cls, tuple_type=cls.tuple_for_row(row))
-
 	def __init__(self, *args, tuple_type=None, **kws):
 		self._tt = tuple_type
-		self._fetch_type = 1 if self._tt else 2
 		super().__init__(*args, **kws)
 
-	def _row(self, row):
+	def _conv_row(self, row):
 		if row is None: return
 		return ( self._tt(*row) if self._tt else
-			self.tuple_for_row(tuple(row.keys()))(*row.values()) )
-
-	def fetchone(self):
-		return self._row(super().fetchone())
-	def fetchmany(self, size=None):
-		for row in super().fetchmany(size=size): yield self._row(row)
-	def fetchall(self):
-		for row in super().fetchall(): yield self._row(row)
+			self.tuple_for_row(tuple(self._fields))(*row) )
 
 
 class ConversionError(Exception): pass
@@ -237,7 +225,7 @@ class DTDtoGTFS:
 		self.ctx.callback(locale.setlocale, locale.LC_ALL, locale_prev)
 
 		self.db = self.ctx.enter_context(
-			contextlib.closing(MySQLdb.connect(charset='utf8mb4', **self.conn_opts_base)) )
+			contextlib.closing(pymysql.connect(charset='utf8mb4', **self.conn_opts_base)) )
 		with self.db.cursor() as cur:
 			cur.execute('show variables like %s', ['sql_mode'])
 			mode_flags = set(map(str.strip, dict(cur.fetchall())['sql_mode'].lower().split(',')))
