@@ -211,8 +211,10 @@ class DTDtoGTFS:
 
 	def __init__( self,
 			db_cif, db_gtfs, conn_opts_base, bank_holidays,
-			db_gtfs_schema=None, db_gtfs_mem=None, db_noop=False ):
-		self.db_cif, self.db_gtfs, self.db_noop = db_cif, db_gtfs, db_noop
+			db_gtfs_schema=None, db_gtfs_mem=None,
+			db_noop=False, db_nocommit=False ):
+		self.db_cif, self.db_gtfs = db_cif, db_gtfs
+		self.db_noop, self.db_nocommit = db_noop, db_nocommit
 		self.db_gtfs_schema, self.db_gtfs_mem = db_gtfs_schema, db_gtfs_mem
 		self.conn_opts_base, self.bank_holidays = conn_opts_base, bank_holidays
 		self.log, self.log_sql = get_logger('dtd2gtfs'), get_logger('dtd2gtfs.sql')
@@ -238,12 +240,13 @@ class DTDtoGTFS:
 			with open(self.db_gtfs_schema) as src: schema = src.read()
 			if self.db_gtfs_mem:
 				schema = re.sub(r'(?i)\bENGINE=\S+\b', 'ENGINE=MEMORY', schema)
-			with self.db.cursor() as cur:
-				cur.execute(f'drop database if exists {self.db_gtfs}')
-				cur.execute(f'create database {self.db_gtfs}')
-				cur.execute(f'use {self.db_gtfs}')
-				cur.execute(schema)
-			self.db.commit()
+			if not self.db_noop:
+				with self.db.cursor() as cur:
+					cur.execute(f'drop database if exists {self.db_gtfs}')
+					cur.execute(f'create database {self.db_gtfs}')
+					cur.execute(f'use {self.db_gtfs}')
+					cur.execute(schema)
+				self.db.commit()
 
 		return self
 
@@ -269,6 +272,10 @@ class DTDtoGTFS:
 		cols, vals = ','.join(row.keys()), ','.join(['%s']*len(row))
 		return self.q( 'INSERT INTO'
 			f' {table} ({cols}) VALUES ({vals})', *row.values(), fetch=False )
+
+	def commit(self):
+		if self.db_noop or self.db_nocommit: return
+		self.db.commit()
 
 
 	def run(self, test_run_slice=None):
@@ -303,6 +310,7 @@ class DTDtoGTFS:
 		self.assign_service_id_to_trips(trip_svc_ids)
 
 		### Done!
+		self.commit()
 		if self.log.isEnabledFor(logging.DEBUG): self.log_stats()
 
 
@@ -709,7 +717,7 @@ def main(args=None):
 	with DTDtoGTFS(
 			opts.src_cif_db, opts.dst_gtfs_db, mysql_conn_opts, bank_holidays,
 			db_gtfs_schema=opts.dst_gtfs_schema, db_gtfs_mem=opts.test_memory_schema,
-			db_noop=opts.test_no_output ) as conv:
+			db_noop=opts.test_no_output, db_nocommit=opts.test_no_commit ) as conv:
 		conv.run(opts.test_train_limit)
 
 if __name__ == '__main__': sys.exit(main())
