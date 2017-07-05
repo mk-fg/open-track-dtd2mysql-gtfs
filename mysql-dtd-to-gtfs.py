@@ -243,6 +243,7 @@ class DTDtoGTFS:
 				cur.execute(f'create database {self.db_gtfs}')
 				cur.execute(f'use {self.db_gtfs}')
 				cur.execute(schema)
+			self.db.commit()
 
 		return self
 
@@ -312,10 +313,10 @@ class DTDtoGTFS:
 		self.q('''
 			INSERT INTO gtfs.stops
 				( stop_id, stop_code, stop_name, stop_desc,
-					stop_timezone, location_type, wheelchair_boarding )
+					stop_timezone, wheelchair_boarding )
 				SELECT
 					crs_code, tiploc_code, description, description,
-						"Europe/London" as tz, 0 as loc_type, 0 as acc_wheelchair
+						"Europe/London" as tz, 0 as acc_wheelchair
 				FROM cif.tiploc
 				WHERE
 					crs_code IS NOT NULL
@@ -328,13 +329,26 @@ class DTDtoGTFS:
 		self.log.debug('Populating gtfs.transfers table...')
 		self.q('''
 			INSERT INTO gtfs.transfers
-				SELECT null, origin, destination, 2, duration * 60
+				SELECT
+					crs_code AS from_stop_id,
+					crs_code AS to_stop_id,
+					2 AS transfer_type,
+					minimum_change_time * 60 AS duration
+				FROM cif.physical_station
+				UNION
+				SELECT
+					origin AS from_stop_id,
+					destination AS to_stop_id,
+					2 AS transfer_type,
+					duration * 60 AS duration
+				FROM cif.fixed_link
+				UNION
+				SELECT
+					destination AS from_stop_id,
+					origin AS to_stop_id,
+					2 AS transfer_type,
+					duration * 60 AS duration
 				FROM cif.fixed_link''')
-		# Interchange times
-		self.q('''
-			INSERT INTO gtfs.transfers
-				SELECT null, crs_code, crs_code, 2, minimum_change_time * 60
-				FROM cif.physical_station''')
 
 
 	def process_schedules(self, test_run_slice):
@@ -444,7 +458,7 @@ class DTDtoGTFS:
 				trip_hash, trip_stops = [s.train_uid], list()
 
 				# XXX: time conversions - DTD->GTFS and late->next-day
-				for n, st in enumerate(stops, 1):
+				for st in stops:
 					public_stop = st.public_arrival_time or st.public_departure_time
 					if public_stop:
 						pickup_type = GTFSPickupType.regular
@@ -488,13 +502,13 @@ class DTDtoGTFS:
 				trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx) + 1
 				# XXX: check if more trip/stop metadata can be filled-in here
 				self.insert( 'gtfs.trips',
-					trip_id=trip_id, route_id=route_id, service_id=s.id,
+					trip_id=trip_id, route_id=route_id, service_id=0,
 					trip_headsign=s.train_uid, trip_short_name=s.retail_train_id )
-				for st, pickup_type, ts_arr, ts_dep in trip_stops:
+				for n, (st, pickup_type, ts_arr, ts_dep) in enumerate(trip_stops, 1):
 					self.insert( 'gtfs.stop_times',
 						trip_id=trip_id, pickup_type=int(pickup_type),
 						arrival_time=ts_arr, departure_time=ts_dep,
-						stop_id=st.crs_code, stop_sequence=n, )
+						stop_id=st.crs_code, stop_sequence=n )
 				trip_svc_timespans[trip_id].append(svc_span)
 				train_trip_ids.add(trip_id)
 
@@ -599,10 +613,10 @@ class DTDtoGTFS:
 					self.stats['trip-row-dup-op'] += 1
 					trip_id = next(trip_id_seq)
 					if self.db_noop: continue
-					trip.update(id=None, trip_id=trip_id)
+					trip['trip_id'] = trip_id
 					self.insert('gtfs.trips', **trip)
 					for st in trip_stops:
-						st.update(id=None, trip_id=trip_id)
+						st['trip_id'] = trip_id
 						self.insert('gtfs.stop_times', **st)
 
 
@@ -667,6 +681,9 @@ def main(args=None):
 			' option and replace table engine with ENGINE=MEMORY.')
 	group.add_argument('--test-no-output', action='store_true',
 		help='Instead of populating destination schema with results, just drop these on the floor.')
+	group.add_argument('--test-no-commit', action='store_true',
+		help='Do not commit data transaction to destination tables.'
+			' Has no effect on -i/--dst-gtfs-schema option')
 	group.add_argument('-v', '--verbose', action='store_true',
 		help='Print info about non-critical errors and quirks found during conversion.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
