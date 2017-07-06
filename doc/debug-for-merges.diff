@@ -1,0 +1,64 @@
+diff --git a/mysql-dtd-to-gtfs.py b/mysql-dtd-to-gtfs.py
+index f3498c9..7161de4 100755
+--- a/mysql-dtd-to-gtfs.py
++++ b/mysql-dtd-to-gtfs.py
+@@ -533,13 +533,21 @@ class DTDtoGTFS:
+ 
+ 				### Trip deduplication
+ 
++				print(f'--- trip from schedule {s.id} {s.stp_indicator} {s.runs_from} {s.runs_to}')
++				print(f'  service: {svc_span}')
++				print(
++					'  stops[{:>2d}]:'.format(len(trip_stops)),
++					' '.join(st[0].crs_code for st in trip_stops) )
++
+ 				trip_hash = hash(tuple(trip_hash))
+ 				if trip_hash in trip_merge_idx:
+ 					self.stats['trip-dedup'] += 1
+ 					trip_id = trip_merge_idx[trip_hash]
++					print('  duplicate for:', trip_id)
+ 					trip_svc_timespans[trip_id].append(svc_span)
+ 					continue
+ 				trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx) + 1
++				print('  added as:', trip_id)
+ 
+ 				### Insert new gtfs.trip (and its stop_times)
+ 
+@@ -608,8 +616,16 @@ class DTDtoGTFS:
+ 		trip_svc_ids = dict() # {trip_id: svc_id_list}
+ 
+ 		self.log.debug('Merging service timespans for {} gtfs.trips...', len(trip_svc_timespans))
++
++		print('-'*20, 'merge')
++
+ 		for trip_id, spans in trip_svc_timespans.items():
+ 			spans = spans_pre = trip_svc_ids[trip_id] = spans.copy()
++			print(f'+++ trip {trip_id}')
++			if len(spans) == 1: print(f'  spans:', span)
++			else:
++				print(f'  spans:')
++				for span in sorted(spans): print('    ', span)
+ 
+ 			### Merge timespans where possible
+ 			if len(spans) > 1:
+@@ -621,11 +637,19 @@ class DTDtoGTFS:
+ 						merged = s1.merge(s2)
+ 						if merged:
+ 							spans.difference_update([s1, s2])
++							s1, s2 = sorted([s1, s2])
++							print('  merge:')
++							print(f'    {s1} + {s2}')
++							print(f'    = {merged}')
+ 							spans.add(merged)
+ 							self.stats['svc-merge-op'] += 1
+ 					if len(spans) == spans_before: break
+ 				spans = trip_svc_ids[trip_id] = list(spans)
+-				if len(spans) != len(spans_pre): self.stats['svc-merge'] += 1
++				if len(spans) != len(spans_pre):
++					self.stats['svc-merge'] += 1
++					trip, = self.qb('SELECT * FROM gtfs.trips WHERE trip_id = %s', trip_id)
++					print('  trip-info:', trip.trip_headsign, trip.trip_short_name)
++					print('  merged-to:', sorted(spans))
+ 
+ 			### Store into gtfs.calendar/gtfs.calendar_dates, assigning service_id to each
+ 			for n, span in enumerate(spans):
