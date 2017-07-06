@@ -629,10 +629,7 @@ class DTDtoGTFS:
 	def assign_service_id_to_trips(self, trip_svc_ids):
 		'''Update gtfs.trips with assigned service_id values,
 			duplicating trip where there's >1 service_id associated with it.'''
-
-		trip_id_seq = max(trip_svc_ids, default=0) + 1
-		trip_id_seq = iter(range(trip_id_seq, trip_id_seq + 2**30))
-
+		trip_id_seq = iter(range(max(trip_svc_ids, default=0) + 1, 2**30))
 		self.log.debug('Updating service_id in gtfs.trips table...')
 		for trip_id, svc_id_list in trip_svc_ids.items():
 			if not svc_id_list: # all timespans for trip got cancelled somehow
