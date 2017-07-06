@@ -521,6 +521,8 @@ class DTDtoGTFS:
 						ts_arr, ts_dep = st.scheduled_arrival_time, st.scheduled_departure_time
 					# XXX: check if origin has some arrival time indication in CIF data
 					ts_arr, ts_dep = ts_arr or ts_dep, ts_dep or ts_arr # origin/termination stops
+					# XXX: not sure if stops without time should be skipped like that, maybe use averages?
+					if not (ts_arr and ts_dep): continue
 
 					trip_stops.append((st, pickup_type, ts_arr, ts_dep))
 					trip_hash.append(( st.crs_code,
