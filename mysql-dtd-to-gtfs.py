@@ -763,7 +763,7 @@ def main(args=None):
 	if opts.test_train_uid:
 		test_uids = opts.test_train_uid.split()
 		if opts.test_train_limit: test_uids = test_uids[:opts.test_train_limit]
-	else: test_uids = opts.test_train_uid
+	else: test_uids = opts.test_train_limit
 
 	# Useful stuff for ~/.my.cnf: host port user passwd connect_timeout
 	mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
