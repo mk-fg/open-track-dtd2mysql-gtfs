@@ -141,17 +141,20 @@ class GTFSTimespan:
 	@property
 	def weekday_dict(self): return dict(zip(self.weekday_order, self.weekdays))
 
-	def date_iter(self, reverse=False):
+	def date_iter(self, a=None, b=None, weekdays=None, except_days=None, reverse=False):
 		'Iterates over all valid (non-weekend/excluded) dates in this timespan.'
-		day = self.start if not reverse else self.end
-		service_day_check = ( lambda d:
-			self.weekdays[d.weekday()] and d not in self.except_days )
+		a, b = a or self.start, b or self.end
+		day = a if not reverse else b
+		service_day_check = ( lambda d,
+				wd=weekdays or self.weekdays,
+				ed=except_days or self.except_days:
+			wd[d.weekday()] and d not in ed )
 		if not reverse:
-			while day <= self.end:
+			while day <= b:
 				if service_day_check(day): yield day
 				day += self.one_day
 		else:
-			while day >= self.start:
+			while day >= a:
 				if service_day_check(day): yield day
 				day -= self.one_day
 
@@ -165,6 +168,7 @@ class GTFSTimespan:
 		if s1 == s2: return s1
 		if s1 > s2: s1, s2 = s2, s1
 		if s1.end >= s2.start: # overlap
+			# XXX: except_days on overlapping part should use intersection, not union!!!
 			return GTFSTimespan(
 				s1.start, max(s1.end, s2.end),
 				s1.except_days | s2.except_days, weekdays )
@@ -242,6 +246,7 @@ class DTDtoGTFS:
 		warnings.filterwarnings('error')
 
 		c = self.c = self.connect()
+		self.db = self.db_conns[None]
 		if self.db_gtfs_schema:
 			self.log.debug( 'Initializing gtfs database'
 				' (name={}, memory-engine={}) tables...', self.db_gtfs, bool(self.db_gtfs_mem) )
@@ -259,7 +264,7 @@ class DTDtoGTFS:
 
 	def __exit__(self, *exc):
 		if self.ctx: self.ctx = self.ctx.close()
-		self.db_conns = self.db_cursors = None
+		self.db_conns = self.db_cursors = self.db = self.c = None
 
 
 	def connect(self, key=None):
@@ -301,6 +306,9 @@ class DTDtoGTFS:
 	def commit(self, force=False):
 		if not force and (self.db_noop or self.db_nocommit): return
 		for conn in self.db_conns.values(): conn.commit()
+
+	def escape(self, val):
+		return self.db.escape(val)
 
 
 	def run(self, test_run_slice=None):
@@ -397,16 +405,25 @@ class DTDtoGTFS:
 		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
 
 		# Schedules are fetched along with stops that get grouped by python code later
-		train_uid_slice = '' if not test_run_slice else f'''
-			JOIN
-				( SELECT DISTINCT(train_uid) AS train_uid
-					FROM cif.schedule rs
-					JOIN
-						(SELECT CEIL(RAND() * (SELECT MAX(id) FROM cif.schedule)) AS id) rss
-						ON rs.id >= rss.id
-					GROUP BY train_uid HAVING COUNT(*) > 0
-					LIMIT {test_run_slice} ) r
-				ON r.train_uid = s.train_uid'''
+		if isinstance(test_run_slice, int):
+			train_uid_slice = f'''
+				JOIN
+					( SELECT DISTINCT(train_uid) AS train_uid
+						FROM cif.schedule rs
+						JOIN
+							(SELECT CEIL(RAND() * (SELECT MAX(id) FROM cif.schedule)) AS id) rss
+							ON rs.id >= rss.id
+						GROUP BY train_uid HAVING COUNT(*) > 0
+						LIMIT {test_run_slice} ) r
+					ON r.train_uid = s.train_uid'''
+		elif test_run_slice:
+			train_uid_slice = ','.join(map(self.escape, test_run_slice))
+			train_uid_slice = f'''
+				JOIN
+					( SELECT DISTINCT(train_uid) AS train_uid
+						FROM cif.schedule rs WHERE rs.train_uid IN ({train_uid_slice})) r
+					ON r.train_uid = s.train_uid'''
+		else: train_uid_slice = ''
 		schedules = f'''
 			SELECT *
 			FROM cif.schedule s
@@ -517,6 +534,7 @@ class DTDtoGTFS:
 					trip_id = trip_merge_idx[trip_hash]
 					trip_svc_timespans[trip_id].append(svc_span)
 					continue
+				trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx) + 1
 
 				### Insert new gtfs.trip (and its stop_times)
 
@@ -535,7 +553,6 @@ class DTDtoGTFS:
 						route_long_name='From {} to {}'.format(*(
 							(stops[n].description.title() or stops[n].crs_code) for n in [0, -1] )) )
 
-				trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx) + 1
 				# XXX: check if more trip/stop metadata can be filled-in here
 				self.insert( 'gtfs.trips',
 					trip_id=trip_id, route_id=route_id, service_id=0,
@@ -712,6 +729,8 @@ def main(args=None):
 	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
 		help='Do test-run with specified number of randomly-selected trains only.'
 			' This always produces incomplete results, only useful for testing the code quickly.')
+	group.add_argument('--test-train-uid', metavar='uid-list',
+		help='Do test-run with specified train_uid entries only. Multiple values are split by spaces.')
 	group.add_argument('--test-memory-schema', action='store_true',
 		help='Process schema dump passed to -s/--dst-gtfs-schema'
 			' option and replace table engine with ENGINE=MEMORY.')
@@ -739,6 +758,11 @@ def main(args=None):
 			for line in src.read().splitlines():
 				bank_holidays.add(datetime.datetime.strptime(line, opts.uk_bank_holiday_fmt).date())
 
+	if opts.test_train_uid:
+		test_uids = opts.test_train_uid.split()
+		if opts.test_train_limit: test_uids = test_uids[:opts.test_train_limit]
+	else: test_uids = opts.test_train_uid
+
 	# Useful stuff for ~/.my.cnf: host port user passwd connect_timeout
 	mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
 		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
@@ -746,6 +770,6 @@ def main(args=None):
 			opts.src_cif_db, opts.dst_gtfs_db, mysql_conn_opts, bank_holidays,
 			db_gtfs_schema=opts.dst_gtfs_schema, db_gtfs_mem=opts.test_memory_schema,
 			db_noop=opts.test_no_output, db_nocommit=opts.test_no_commit ) as conv:
-		conv.run(opts.test_train_limit)
+		conv.run(test_uids)
 
 if __name__ == '__main__': sys.exit(main())
