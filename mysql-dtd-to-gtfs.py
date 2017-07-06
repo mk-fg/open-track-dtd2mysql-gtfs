@@ -227,7 +227,7 @@ class DTDtoGTFS:
 			db_cif, db_gtfs, conn_opts_base, bank_holidays,
 			db_gtfs_schema=None, db_gtfs_mem=None,
 			db_noop=False, db_nocommit=False ):
-		self.db_cif, self.db_gtfs = db_cif, db_gtfs
+		self.db_cif, self.db_gtfs, self.db_names = db_cif, db_gtfs, dict(cif=db_cif, gtfs=db_gtfs)
 		self.db_noop, self.db_nocommit = db_noop, db_nocommit
 		self.db_gtfs_schema, self.db_gtfs_mem = db_gtfs_schema, db_gtfs_mem
 		self.conn_opts_base, self.bank_holidays = conn_opts_base, bank_holidays
@@ -297,10 +297,11 @@ class DTDtoGTFS:
 
 	def insert(self, table, **row):
 		if self.db_noop: return
+		db, table = table.split('.', 1)
 		row = collections.OrderedDict(row.items())
 		cols, vals = ','.join(row.keys()), ','.join(['%s']*len(row))
 		return self.qb(
-			f'INSERT INTO {table} ({cols}) VALUES ({vals})',
+			f'INSERT INTO {self.db_names[db]}.{table} ({cols}) VALUES ({vals})',
 			*row.values(), fetch=False )
 
 	def commit(self, force=False):
@@ -351,14 +352,14 @@ class DTDtoGTFS:
 		# XXX: check if there are locations without crs code and what that means
 		# XXX: convert physical_station eastings/northings to long/lat
 		self.log.debug('Populating gtfs.stops table...')
-		self.qb('''
-			INSERT INTO gtfs.stops
+		self.qb(f'''
+			INSERT INTO {self.db_gtfs}.stops
 				( stop_id, stop_code, stop_name, stop_desc,
 					stop_timezone, wheelchair_boarding )
 				SELECT
 					crs_code, tiploc_code, description, description,
 						"Europe/London" as tz, 0 as acc_wheelchair
-				FROM cif.tiploc
+				FROM {self.db_cif}.tiploc
 				WHERE
 					crs_code IS NOT NULL
 					AND description IS NOT NULL''')
@@ -368,28 +369,28 @@ class DTDtoGTFS:
 		# XXX: better data source / convert to trip+frequences?
 		# XXX: losing the mode here, TUBE, WALK, etc
 		self.log.debug('Populating gtfs.transfers table...')
-		self.qb('''
-			INSERT INTO gtfs.transfers
+		self.qb(f'''
+			INSERT INTO {self.db_gtfs}.transfers
 				SELECT
 					crs_code AS from_stop_id,
 					crs_code AS to_stop_id,
 					2 AS transfer_type,
 					minimum_change_time * 60 AS duration
-				FROM cif.physical_station
+				FROM {self.db_cif}.physical_station
 				UNION
 				SELECT
 					origin AS from_stop_id,
 					destination AS to_stop_id,
 					2 AS transfer_type,
 					duration * 60 AS duration
-				FROM cif.fixed_link
+				FROM {self.db_cif}.fixed_link
 				UNION
 				SELECT
 					destination AS from_stop_id,
 					origin AS to_stop_id,
 					2 AS transfer_type,
 					duration * 60 AS duration
-				FROM cif.fixed_link''')
+				FROM {self.db_cif}.fixed_link''')
 
 
 	def process_schedules(self, test_run_slice):
@@ -409,9 +410,10 @@ class DTDtoGTFS:
 			train_uid_slice = f'''
 				JOIN
 					( SELECT DISTINCT(train_uid) AS train_uid
-						FROM cif.schedule rs
+						FROM {self.db_cif}.schedule rs
 						JOIN
-							(SELECT CEIL(RAND() * (SELECT MAX(id) FROM cif.schedule)) AS id) rss
+							(SELECT CEIL(RAND() *
+								(SELECT MAX(id) FROM {self.db_cif}.schedule)) AS id) rss
 							ON rs.id >= rss.id
 						GROUP BY train_uid HAVING COUNT(*) > 0
 						LIMIT {test_run_slice} ) r
@@ -421,19 +423,20 @@ class DTDtoGTFS:
 			train_uid_slice = f'''
 				JOIN
 					( SELECT DISTINCT(train_uid) AS train_uid
-						FROM cif.schedule rs WHERE rs.train_uid IN ({train_uid_slice})) r
+						FROM {self.db_cif}.schedule rs
+						WHERE rs.train_uid IN ({train_uid_slice})) r
 					ON r.train_uid = s.train_uid'''
 		else: train_uid_slice = ''
 		schedules = f'''
 			SELECT *
-			FROM cif.schedule s
+			FROM {self.db_cif}.schedule s
 			{train_uid_slice}
-			LEFT JOIN cif.schedule_extra e ON e.schedule = s.id
-			LEFT JOIN cif.stop_time st ON st.schedule = s.id
-			LEFT JOIN cif.tiploc t ON t.tiploc_code = st.location
+			LEFT JOIN {self.db_cif}.schedule_extra e ON e.schedule = s.id
+			LEFT JOIN {self.db_cif}.stop_time st ON st.schedule = s.id
+			LEFT JOIN {self.db_cif}.tiploc t ON t.tiploc_code = st.location
 			WHERE t.crs_code IS NOT NULL AND t.description IS NOT NULL
 			ORDER BY s.train_uid, FIELD(s.stp_indicator, "P", "N", "O", "C"), s.id, st.id'''
-		(sched_count,), = self.q(f'SELECT COUNT(*) FROM cif.schedule s {train_uid_slice}')
+		(sched_count,), = self.q(f'SELECT COUNT(*) FROM {self.db_cif}.schedule s {train_uid_slice}')
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
 		schedules = self.q(schedules)
 
@@ -652,15 +655,17 @@ class DTDtoGTFS:
 		self.log.debug('Updating service_id in gtfs.trips table...')
 		for trip_id, svc_id_list in trip_svc_ids.items():
 			if not svc_id_list: # all timespans for trip got cancelled somehow
-				self.qb('DELETE FROM gtfs.trips WHERE trip_id = %s', trip_id)
-				self.qb('DELETE FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
+				self.qb(f'DELETE FROM {self.db_gtfs}.trips WHERE trip_id = %s', trip_id)
+				self.qb(f'DELETE FROM {self.db_gtfs}.stop_times WHERE trip_id = %s', trip_id)
 				self.stats['trip-delete'] += 1
 				continue
-			self.qb('UPDATE gtfs.trips SET service_id = %s WHERE trip_id = %s', svc_id_list[0], trip_id)
+			self.qb( f'UPDATE {self.db_gtfs}.trips SET'
+				' service_id = %s WHERE trip_id = %s', svc_id_list[0], trip_id)
 			if len(svc_id_list) > 1:
 				if not self.db_noop:
-					trip, = self.qb('SELECT * FROM gtfs.trips WHERE trip_id = %s', trip_id)
-					trip_stops = self.qb('SELECT * FROM gtfs.stop_times WHERE trip_id = %s', trip_id)
+					trip, = self.qb(f'SELECT * FROM {self.db_gtfs}.trips WHERE trip_id = %s', trip_id)
+					trip_stops = self.qb( 'SELECT * FROM'
+						f' {self.db_gtfs}.stop_times WHERE trip_id = %s', trip_id )
 					trip, trip_stops = trip._asdict(), list(s._asdict() for s in trip_stops)
 				self.stats['trip-row-dup'] += 1
 				for svc_id in svc_id_list[1:]:
