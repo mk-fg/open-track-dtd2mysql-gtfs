@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-import os, sys, contextlib, logging, pathlib, re, warnings
-import collections, enum, math, time
-import datetime, calendar, locale
+import os, sys, contextlib, logging, pathlib, re, warnings, locale
+import collections, enum, math, time, datetime
 
 import pymysql, pymysql.cursors # https://pymysql.readthedocs.io/
 
@@ -69,8 +68,6 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 	coro = _progress_iter_coro(n)
 	next(coro)
 	return coro
-
-it_ngrams = lambda seq, n: zip(*(it.islice(seq, i, None) for i in range(n)))
 
 
 class NTCursor(pymysql.cursors.SSDictCursor):
@@ -257,7 +254,7 @@ class DTDtoGTFS:
 				# Not using "drop database if exists" here as it raises warnings
 				c.execute( 'SELECT schema_name FROM'
 					' information_schema.schemata WHERE schema_name=%s', self.db_gtfs )
-				if c.fetchone() is not None: c.execute(f'drop database {self.db_gtfs}')
+				if list(c.fetchall()): c.execute(f'drop database {self.db_gtfs}')
 				c.execute(f'create database {self.db_gtfs}')
 				c.execute(f'use {self.db_gtfs}')
 				c.execute(schema)
