@@ -254,7 +254,10 @@ class DTDtoGTFS:
 			if self.db_gtfs_mem:
 				schema = re.sub(r'(?i)\bENGINE=\S+\b', 'ENGINE=MEMORY', schema)
 			if not self.db_noop:
-				c.execute(f'drop database if exists {self.db_gtfs}')
+				# Not using "drop database if exists" here as it raises warnings
+				c.execute( 'SELECT schema_name FROM'
+					' information_schema.schemata WHERE schema_name=%s', self.db_gtfs )
+				if c.fetchone() is not None: c.execute(f'drop database {self.db_gtfs}')
 				c.execute(f'create database {self.db_gtfs}')
 				c.execute(f'use {self.db_gtfs}')
 				c.execute(schema)
