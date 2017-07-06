@@ -172,7 +172,7 @@ class GTFSTimespan:
 		if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split:
 			day, except_days = s1.end + self.one_day, set(s1.except_days | s2.except_days)
 			while day < s2.start:
-				if not weekdays[day.weekday()]: except_days.add(day)
+				if weekdays[day.weekday()]: except_days.add(day)
 				day += self.one_day
 			return GTFSTimespan(s1.start, max(s1.end, s2.end), except_days, weekdays)
 
