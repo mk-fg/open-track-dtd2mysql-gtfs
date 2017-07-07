@@ -122,7 +122,6 @@ class GTFSTimespan:
 
 	weekday_order = 'monday tuesday wednesday thursday friday saturday sunday'.split()
 	day = datetime.timedelta(days=1)
-	day_inc, day_dec = lambda d,n=day:d+n, lambda d,n=day:d-n
 
 	def __init__(self, start, end, weekdays=None, except_days=None):
 		assert all(isinstance(d, datetime.date) for d in it.chain([start, end], except_days or list()))

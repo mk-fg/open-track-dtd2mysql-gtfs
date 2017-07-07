@@ -50,6 +50,14 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 	next(coro)
 	return coro
 
+def iter_range(a, b, step):
+	if a > b: step = -step
+	v = a
+	while True:
+		yield v
+		if v == b: break
+		v += step
+
 class adict(dict):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
@@ -57,22 +65,6 @@ class adict(dict):
 	def __setattr__(self, k, v):
 		if k.startswith('_'): super().__setattr__(k, v)
 		self[k] = v
-
-def dts_parse(dts_str):
-	if ':' not in dts_str: return float(dts_str)
-	dts_vals = dts_str.split(':')
-	if len(dts_vals) == 2: dts_vals.append('00')
-	assert len(dts_vals) == 3, dts_vals
-	return sum(int(n)*k for k, n in zip([3600, 60, 1], dts_vals))
-
-def dts_format(dts, sec=False):
-	if isinstance(dts, str): return dts
-	if isinstance(dts, datetime.timedelta): dts = dts.total_seconds()
-	dts_days, dts = divmod(int(dts), 24 * 3600)
-	dts = str(datetime.time(dts // 3600, (dts % 3600) // 60, dts % 60, dts % 1))
-	if not sec: dts = dts.rsplit(':', 1)[0]
-	if dts_days: dts = '{}+{}'.format(dts_days, dts)
-	return dts
 
 
 class NTCursor(pymysql.cursors.SSDictCursor):
@@ -99,6 +91,66 @@ class NTCursor(pymysql.cursors.SSDictCursor):
 			rows = self.fetchmany(bs)
 			if not rows: break
 			for row in rows: yield row
+
+
+@ft.total_ordering
+class GTFSTimespan:
+
+	weekday_order = 'monday tuesday wednesday thursday friday saturday sunday'.split()
+	day = datetime.timedelta(days=1)
+
+	def __init__(self, start, end, weekdays=None, except_days=None):
+		assert all( isinstance(d, datetime.date)
+			for d in it.chain([start, end], except_days or list()) ), [start, end, except_days]
+		self.start, self.end = start, end
+		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
+		self.weekdays, self.except_days = tuple(map(int, weekdays)), set(except_days or list())
+		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
+		except StopIteration: raise GTFSTimespanInvalid(str(self))
+		self.except_days = frozenset(filter(
+			lambda day: start <= day <= end and self.weekdays[day.weekday()], self.except_days ))
+		self._hash_tuple = self.start, self.end, self.weekdays, self.except_days
+
+	def __lt__(self, span): return self._hash_tuple < span._hash_tuple
+	def __eq__(self, span): return self._hash_tuple == span._hash_tuple
+	def __hash__(self): return hash(self._hash_tuple)
+
+	def __repr__(self):
+		weekdays = ''.join((str(n) if d else '.') for n,d in enumerate(self.weekdays, 1))
+		except_days = ', '.join(map(str, self.except_days))
+		return f'<TS {weekdays} [{self.start} {self.end}] {{{except_days}}}>'
+
+	@property
+	def weekday_dict(self): return dict(zip(self.weekday_order, self.weekdays))
+
+	def date_iter(self, reverse=False):
+		'Iterator for all valid (non-weekend/excluded) dates in this timespan.'
+		return self.date_range( self.start, self.end,
+			self.weekdays, self.except_days, reverse=reverse )
+
+	@classmethod
+	def date_range(cls, a, b, weekdays=None, except_days=None, reverse=False):
+		if a > b: return
+		if reverse: a, b = b, a
+		svc_day_check = ( lambda day, wd=weekdays or [1]*7,
+			ed=except_days or set(): wd[day.weekday()] and day not in ed )
+		for day in filter(svc_day_check, iter_range(a, b, cls.day)): yield day
+
+
+def dts_format(dts, sec=False):
+	if isinstance(dts, str): return dts
+	if isinstance(dts, datetime.timedelta): dts = dts.total_seconds()
+	dts_days, dts = divmod(int(dts), 24 * 3600)
+	dts = str(datetime.time(dts // 3600, (dts % 3600) // 60, dts % 60, dts % 1))
+	if not sec: dts = dts.rsplit(':', 1)[0]
+	if dts_days: dts = '{}+{}'.format(dts_days, dts)
+	return dts
+
+def stop_seq_str(seq):
+	return ' - '.join(
+		f'{stop}[{{}}]'.format(
+			f'{dts_arr}/{dts_dep}' if dts_arr != dts_dep else dts_arr )
+		for stop, dts_arr, dts_dep in seq )
 
 
 class GTFSDB:
@@ -261,10 +313,10 @@ class GTFSDB:
 			diff_found, stats = False, dict((db, collections.Counter()) for db in dbs)
 			trip_info = dict((db, adict()) for db in dbs)
 
-			# Populate trip_info
+			### Populate trip_info
 			for db in dbs:
-				trip_span_idx, trip_stops_set = collections.defaultdict(set), set()
-				trip_info[db].spans, trip_info[db].stops = trip_span_idx, trip_stops_set
+				trip_span_idx, trip_stops_idx = collections.defaultdict(set), dict()
+				trip_info[db].spans, trip_info[db].stops = trip_span_idx, trip_stops_idx
 				trips = list(self.q(f'''
 					SELECT
 						t.trip_id,
@@ -278,44 +330,96 @@ class GTFSDB:
 					WHERE t.trip_headsign = %s
 					ORDER BY t.trip_id, st.stop_sequence''', train_uid))
 				for trip_id, stops in it.groupby(trips, op.attrgetter('trip_id')):
-					trip = next(stops)
-					stops, trip_stops = [trip, *stops], list()
-					for st in stops:
-						if not (st.ts_arr or st.ts_dep):
-							stats[db]['stop-no-times'] += 1
-							continue
-						ts_arr = dts_format(st.ts_arr or st.ts_dep)
-						ts_dep = dts_format(st.ts_dep or st.ts_arr)
-						trip_stops.append((st.id, ts_arr, ts_dep))
+					trip, trip_stops = next(stops), list()
+					if trip.id is None: stats[db]['trip-empty'] += 1
+					else:
+						for st in [trip, *stops]:
+							if not (st.ts_arr or st.ts_dep):
+								stats[db]['stop-no-times'] += 1
+								continue
+							ts_arr = dts_format(st.ts_arr or st.ts_dep)
+							ts_dep = dts_format(st.ts_dep or st.ts_arr)
+							trip_stops.append((st.id, ts_arr, ts_dep))
 					trip_stops, trip_hash = tuple(trip_stops), hash(tuple(trip_stops))
-					# if trip_hash in trip_stop_idx: stats[db]['trip-dup-stops'] += 1
-					# if trip.svc_id in trip_span_idx[trip_hash]: stats[db]['trip-dup-svc'] += 1
+					if trip.svc_id in trip_span_idx[trip_hash]: stats[db]['trip-dup'] += 1 # same stops/svc
 					trip_span_idx[trip_hash].add(trip.svc_id)
-					trip_stops_set.add(trip_stops)
+					trip_stops_idx[trip_hash] = trip_stops
 
-			log.debug('Comparing trip-stops for train_uid={}...', train_uid)
-			diff = diff_func(*(trip_info[db].stops for db in dbs))
+
+			log.debug('Comparing trip stops for train_uid={}...', train_uid)
+			diff = diff_func(*(set(trip_info[db].stops.values()) for db in dbs))
 			if diff:
+				diff_found |= True
 				added, removed = diffs = \
 					diff.get('set_item_added', list()), diff.get('set_item_removed', list())
 				log.info('Stop sequence(s) mismatch for train_uid: {}', train_uid)
 				if len(added) == len(removed) == 1:
-					print(f'--- Different stop sequence (t1={db1}, t2={db2}):')
-					diff_found = diff_print(diff_func(
+					print(f'--- [{train_uid}] Different stop sequence (t1={db1}, t2={db2}):')
+					diff_print(diff_func(
 						list(diff['set_item_removed'])[0].t1,
 						list(diff['set_item_added'])[0].t2 ))
 				elif bool(added) or bool(removed):
 					for (k, t), seq_list in zip([(f'in {db2}', 't2'), (f'in {db1}', 't1')], diffs):
 						if not seq_list: continue
-						print(f'--- Only {k} ({len(seq_list)}):')
-						for seq in seq_list:
-							print(diff_print_fill(' - '.join(
-								f'{stop}[{{}}]'.format(
-									f'{dts_arr}/{dts_dep}' if dts_arr != dts_dep else dts_arr )
-								for stop, dts_arr, dts_dep in getattr(seq, t) )))
+						print(f'--- [{train_uid}] Only {k} ({len(seq_list)}):')
+						for seq in seq_list: print(diff_print_fill(stop_seq_str(getattr(seq, t))))
 				else:
-					print('--- Multiple/mismatched changes:')
-					diff_found = diff_print(diff)
+					print('--- [{train_uid}] Multiple/mismatched changes:')
+					diff_print(diff)
+
+
+			log.debug('Comparing trip calendars for train_uid={}...', train_uid)
+			th1, th2 = (set(trip_info[db].spans.keys()) for db in dbs)
+			for trip_hash in th1 & th2:
+				db_days, db_spans = list(), list()
+				for db in dbs:
+					svc_ids = ','.join(map(self.escape, trip_info[db].spans[trip_hash]))
+					calendars = self.q(f'''
+						SELECT
+							service_id AS id, start_date AS a, end_date AS b,
+							concat(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
+							date, exception_type AS exc
+						FROM {db}.calendar c
+						LEFT JOIN {db}.calendar_dates cd USING(service_id)
+						WHERE service_id IN ({svc_ids})
+						ORDER BY service_id''' )
+					svc_days, svc_spans = set(), list()
+					for svc_id, days in it.groupby(calendars, op.attrgetter('id')):
+						svc = next(days)
+						days = list() if svc.date is None else [svc, *days]
+						exc_days = set(row.date for row in days if row.exc == 2)
+						extra_days = set(row.date for row in days if row.exc == 1)
+						span = GTFSTimespan(svc.a, svc.b, tuple(map(int, svc.days)), exc_days)
+						svc_days.update(it.chain(span.date_iter(), extra_days))
+						svc_spans.append((span, extra_days))
+					db_days.append(set(map(str, svc_days)))
+					db_spans.append(svc_spans)
+				days1, days2 = db_days
+				diff = diff_func(days1, days2)
+				if diff:
+					diff_found |= True
+					log.info('Calendars mismatch for train_uid: {}', train_uid)
+					print(f'--- [{train_uid}] Different service days (t1={db1}, t2={db2}):')
+					seq = trip_info[db].stops[trip_hash]
+					print('  trip stops:')
+					print(diff_print_fill(stop_seq_str(seq), '    ', '    '))
+					print(f'  service days: {db1}={len(days1):,} {db2}={len(days2):,}')
+					print('  spans:')
+					for db, spans in zip(dbs, db_spans):
+						print(f'    {db}:')
+						for span, extra_days in spans:
+							extra_days = ( '' if not extra_days else
+								'{{{}}}'.format(', '.join(map(str, sorted(extra_days)))) )
+							print(f'      {span}{extra_days}')
+					print(f'  diffs: {db1:^10s}  {db2:^10s}')
+					print('         ----------  ----------')
+					for day in sorted(it.chain.from_iterable(
+							map(op.attrgetter(k), days) for k,days in zip(['t2', 't1'], [
+								diff.get('set_item_added', list()),
+								diff.get('set_item_removed', list()) ]) if days )):
+						print('         {:^10}  {:^10}'.format(
+							*((day if day in days else '') for days in [days1, days2]) ))
+
 
 			for db in dbs:
 				for k, v in stats[db].items(): log.info('[{}] Quirk count: {}={}', db, k, v)
