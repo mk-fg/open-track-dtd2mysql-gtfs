@@ -2,7 +2,7 @@
 
 import itertools as it, operator as op, functools as ft
 import os, sys, contextlib, logging, pathlib, re, warnings, locale
-import collections, time, csv, datetime, pprint, random
+import collections, time, csv, datetime, pprint, textwrap, random
 
 import pymysql, pymysql.cursors # https://pymysql.readthedocs.io/
 import deepdiff # http://deepdiff.readthedocs.io/
@@ -65,11 +65,12 @@ def dts_parse(dts_str):
 	assert len(dts_vals) == 3, dts_vals
 	return sum(int(n)*k for k, n in zip([3600, 60, 1], dts_vals))
 
-def dts_format(dts):
+def dts_format(dts, sec=False):
 	if isinstance(dts, str): return dts
 	if isinstance(dts, datetime.timedelta): dts = dts.total_seconds()
 	dts_days, dts = divmod(int(dts), 24 * 3600)
 	dts = str(datetime.time(dts // 3600, (dts % 3600) // 60, dts % 60, dts % 1))
+	if not sec: dts = dts.rsplit(':', 1)[0]
 	if dts_days: dts = '{}+{}'.format(dts_days, dts)
 	return dts
 
@@ -229,11 +230,14 @@ class GTFSDB:
 
 		self.commit()
 
-	def compare(self, db1, db2, trip_limit=None):
+	def compare( self, db1, db2,
+			train_uid_limit=None, stop_after_train_uid_mismatch=False ):
 		log, dbs = self.log, (db1, db2)
 
-		diff_func = deepdiff.DeepDiff
-		diff_print = ft.partial(pprint.pprint, indent=2)
+		diff_func = ft.partial(deepdiff.DeepDiff, view='tree')
+		diff_print = lambda diff: pprint.pprint(diff, indent=2) or True
+		diff_print_fill = lambda text, tab1=' - ', tabn='   ': textwrap.fill(
+			text, 100, initial_indent=tab1, subsequent_indent=tabn )
 
 		tuid_sets = tuple(
 			set(map( op.itemgetter(0),
@@ -249,18 +253,18 @@ class GTFSDB:
 
 		tuid_check = list(tuid_intersect)
 		random.shuffle(tuid_check, lambda: 0.7401007202888102)
-		tuid_check = tuid_check[:trip_limit or 2**30]
+		tuid_check = tuid_check[:train_uid_limit or 2**30]
 		log.debug('Comparing trips/stops for {} train_uids...', len(tuid_check))
 
 		for train_uid in tuid_check:
 			log.debug('Comparing data for train_uid={}...', train_uid)
-			stats = dict((db, collections.Counter()) for db in dbs)
+			diff_found, stats = False, dict((db, collections.Counter()) for db in dbs)
 			trip_info = dict((db, adict()) for db in dbs)
 
 			# Populate trip_info
 			for db in dbs:
-				trip_span_idx, trip_stop_idx = collections.defaultdict(set), dict()
-				trip_info[db].spans, trip_info[db].stops = trip_span_idx, trip_stop_idx
+				trip_span_idx, trip_stops_set = collections.defaultdict(set), set()
+				trip_info[db].spans, trip_info[db].stops = trip_span_idx, trip_stops_set
 				trips = list(self.q(f'''
 					SELECT
 						t.trip_id,
@@ -287,16 +291,35 @@ class GTFSDB:
 					# if trip_hash in trip_stop_idx: stats[db]['trip-dup-stops'] += 1
 					# if trip.svc_id in trip_span_idx[trip_hash]: stats[db]['trip-dup-svc'] += 1
 					trip_span_idx[trip_hash].add(trip.svc_id)
-					trip_stop_idx[trip_hash] = trip_stops
+					trip_stops_set.add(trip_stops)
 
 			log.debug('Comparing trip-stops for train_uid={}...', train_uid)
-			diff = diff_func(*(set(trip_info[db].stops.values()) for db in dbs))
+			diff = diff_func(*(trip_info[db].stops for db in dbs))
 			if diff:
+				added, removed = diffs = \
+					diff.get('set_item_added', list()), diff.get('set_item_removed', list())
 				log.info('Stop sequence(s) mismatch for train_uid: {}', train_uid)
-				diff_print(diff)
+				if len(added) == len(removed) == 1:
+					print(f'--- Different stop sequence (t1={db1}, t2={db2}):')
+					diff_found = diff_print(diff_func(
+						list(diff['set_item_removed'])[0].t1,
+						list(diff['set_item_added'])[0].t2 ))
+				elif bool(added) or bool(removed):
+					for (k, t), seq_list in zip([(f'in {db2}', 't2'), (f'in {db1}', 't1')], diffs):
+						if not seq_list: continue
+						print(f'--- Only {k} ({len(seq_list)}):')
+						for seq in seq_list:
+							print(diff_print_fill(' - '.join(
+								f'{stop}[{{}}]'.format(
+									f'{dts_arr}/{dts_dep}' if dts_arr != dts_dep else dts_arr )
+								for stop, dts_arr, dts_dep in getattr(seq, t) )))
+				else:
+					print('--- Multiple/mismatched changes:')
+					diff_found = diff_print(diff)
 
 			for db in dbs:
 				for k, v in stats[db].items(): log.info('[{}] Quirk count: {}={}', db, k, v)
+			if diff_found and stop_after_train_uid_mismatch: break
 
 
 def main(args=None):
@@ -332,8 +355,10 @@ def main(args=None):
 	cmd = cmds.add_parser('compare', help='Compare data between two mysql dbs.')
 	cmd.add_argument('db1', help='Database-1 to compare Database-2 against.')
 	cmd.add_argument('db2', help='Database-2 to compare Database-1 against.')
-	cmd.add_argument('-n', '--trip-limit', metavar='n', type=int,
-		help='Stop after comparing specified number of trips.')
+	cmd.add_argument('-n', '--train-uid-limit', metavar='n', type=int,
+		help='Stop after comparing data for specified number of train_uids.')
+	cmd.add_argument('-x', '--stop-after-train-uid-mismatch',
+		action='store_true', help='Stop after encountering first mismatch for train_uid data.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
@@ -350,7 +375,9 @@ def main(args=None):
 			db.parse(opts.db_name, opts.src_path, opts.gtfs_schema)
 
 		elif opts.call == 'compare':
-			db.compare(opts.db1, opts.db2, opts.trip_limit)
+			db.compare(
+				opts.db1, opts.db2, train_uid_limit=opts.train_uid_limit,
+				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch )
 
 		else: parser.error(f'Action not implemented: {opts.call}')
 
