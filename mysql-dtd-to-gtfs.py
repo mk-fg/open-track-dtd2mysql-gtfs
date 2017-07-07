@@ -69,6 +69,14 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 	next(coro)
 	return coro
 
+def iter_range(a, b, step):
+	if a > b: step = -step
+	v = a
+	while True:
+		yield v
+		if v == b: break
+		v += step
+
 
 class NTCursor(pymysql.cursors.SSDictCursor):
 	'Returns namedtuple for each row.'
@@ -113,9 +121,10 @@ class GTFSTimespanEmpty(Exception): pass
 class GTFSTimespan:
 
 	weekday_order = 'monday tuesday wednesday thursday friday saturday sunday'.split()
-	one_day = datetime.timedelta(days=1)
+	day = datetime.timedelta(days=1)
+	day_inc, day_dec = lambda d,n=day:d+n, lambda d,n=day:d-n
 
-	def __init__(self, start, end, except_days=None, weekdays=None):
+	def __init__(self, start, end, weekdays=None, except_days=None):
 		assert all(isinstance(d, datetime.date) for d in it.chain([start, end], except_days or list()))
 		self.start, self.end = start, end
 		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
@@ -138,22 +147,18 @@ class GTFSTimespan:
 	@property
 	def weekday_dict(self): return dict(zip(self.weekday_order, self.weekdays))
 
-	def date_iter(self, a=None, b=None, weekdays=None, except_days=None, reverse=False):
-		'Iterates over all valid (non-weekend/excluded) dates in this timespan.'
-		a, b = a or self.start, b or self.end
-		day = a if not reverse else b
-		service_day_check = ( lambda d,
-				wd=weekdays or self.weekdays,
-				ed=except_days or self.except_days:
-			wd[d.weekday()] and d not in ed )
-		if not reverse:
-			while day <= b:
-				if service_day_check(day): yield day
-				day += self.one_day
-		else:
-			while day >= a:
-				if service_day_check(day): yield day
-				day -= self.one_day
+	def date_iter(self, reverse=False):
+		'Iterator for all valid (non-weekend/excluded) dates in this timespan.'
+		return self.date_range( self.start, self.end,
+			self.weekdays, self.except_days, reverse=reverse )
+
+	@classmethod
+	def date_range(cls, a, b, weekdays=None, except_days=None, reverse=False):
+		if a > b: return
+		if reverse: a, b = b, a
+		svc_day_check = ( lambda day, wd=weekdays or [1]*7,
+			ed=except_days or set(): wd[day.weekday()] and day not in ed )
+		for day in filter(svc_day_check, iter_range(a, b, cls.day)): yield day
 
 	def merge(self, span, exc_days_to_split=5):
 		'''Return new merged timespan or None if it's not possible.
@@ -165,16 +170,17 @@ class GTFSTimespan:
 		if s1 == s2: return s1
 		if s1 > s2: s1, s2 = s2, s1
 		if s1.end >= s2.start: # overlap
-			# XXX: except_days on overlapping part should use intersection, not union!!!
+			a, b = s2.start, min(s1.end, s2.end) # range of overlapping dates
+			exc_intersect = s1.except_days & s2.except_days
 			return GTFSTimespan(
-				s1.start, max(s1.end, s2.end),
-				s1.except_days | s2.except_days, weekdays )
+				s1.start, max(s1.end, s2.end), weekdays, filter(
+					lambda day: (day < a or day > b) or day in exc_intersect,
+					s1.except_days | s2.except_days ) )
 		if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split:
-			day, except_days = s1.end + self.one_day, set(s1.except_days | s2.except_days)
-			while day < s2.start:
-				if weekdays[day.weekday()]: except_days.add(day)
-				day += self.one_day
-			return GTFSTimespan(s1.start, max(s1.end, s2.end), except_days, weekdays)
+			return GTFSTimespan(
+				s1.start, max(s1.end, s2.end), weekdays,
+				set( s1.except_days | s2.except_days |
+					set(self.date_range(s1.end + self.day, s2.start - self.day, weekdays)) ) )
 
 	def difference(self, span):
 		'''Return new timespan with passed span excluded from it.
@@ -187,16 +193,13 @@ class GTFSTimespan:
 			if span.start <= self.start: start = span.end
 			if span.end >= self.end: end = span.start
 			if start > end: raise GTFSTimespanEmpty('Empty timespan result')
-			return GTFSTimespan(start, end, self.except_days, self.weekdays)
+			return GTFSTimespan(start, end, self.weekdays, self.except_days)
 		# Otherwise just add as exception days
-		day, except_days = span.start, set(self.except_days)
-		while day <= span.end:
-			if span.weekdays[day.weekday()]: except_days.add(day)
-			day += self.one_day
-		span_diff = GTFSTimespan(self.start, self.end, except_days, self.weekdays)
-		try: next(span_diff.date_iter())
-		except StopIteration: raise GTFSTimespanEmpty('Empty timespan result')
-		return span_diff
+		try:
+			return GTFSTimespan( self.start, self.end,
+				self.weekdays, self.except_days | frozenset(span.date_iter()) )
+		except GTFSTimespanInvalid:
+			raise GTFSTimespanEmpty('Empty timespan result') from None
 
 	def subtract_days(self, day_from, day_to):
 		'''Return list of new timespans from this one without
@@ -206,13 +209,14 @@ class GTFSTimespan:
 		start, end = self.start, self.end
 		if day_from > start and day_to < end: # splits timespan in two
 			return [
-				GTFSTimespan(start, day_from - self.one_day, self.except_days, self.weekdays),
-				GTFSTimespan(day_to + self.one_day, self.end, self.except_days, self.weekdays) ]
-		if day_from <= self.start and day_to >= self.end: # full overlap
+				GTFSTimespan(start, day_from - self.day, self.weekdays, self.except_days),
+				GTFSTimespan(day_to + self.day, end, self.weekdays, self.except_days) ]
+		if day_from <= start and day_to >= end: # full overlap
 			raise GTFSTimespanEmpty('Empty timespan result')
-		if day_from <= start: start = day_to + self.one_day
-		if day_to >= end: end = day_from - self.one_day
-		return [GTFSTimespan(start, end, self.except_days, self.weekdays)]
+		# Adjust start or end of timespan
+		if day_from <= start: start = day_to + self.day
+		if day_to >= end: end = day_from - self.day
+		return [GTFSTimespan(start, end, self.weekdays, self.except_days)]
 
 
 class DTDtoGTFS:
@@ -471,10 +475,9 @@ class DTDtoGTFS:
 				### Service timespan for this schedule
 
 				try:
-					svc_span = GTFSTimespan(
-						s.runs_from, s.runs_to,
-						except_days=not s.bank_holiday_running and self.bank_holidays,
-						weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order) )
+					svc_span = GTFSTimespan( s.runs_from, s.runs_to,
+						weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order),
+						except_days=not s.bank_holiday_running and self.bank_holidays )
 				except GTFSTimespanInvalid:
 					self.stats['span-empty-sched'] += 1
 					continue
