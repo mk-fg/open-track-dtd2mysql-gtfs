@@ -531,8 +531,7 @@ class DTDtoGTFS:
 					if not (ts_arr and ts_dep): continue
 
 					trip_stops.append((st, pickup_type, ts_arr, ts_dep))
-					trip_hash.append(( st.crs_code,
-						ts_arr and ts_arr.total_seconds(), ts_dep and ts_dep.total_seconds() ))
+					trip_hash.append((st.crs_code, ts_arr.total_seconds(), ts_dep.total_seconds()))
 
 				### Trip deduplication
 

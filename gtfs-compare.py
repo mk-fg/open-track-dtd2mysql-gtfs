@@ -2,9 +2,10 @@
 
 import itertools as it, operator as op, functools as ft
 import os, sys, contextlib, logging, pathlib, re, warnings, locale
-import collections, time, csv, datetime
+import collections, time, csv, datetime, pprint, random
 
 import pymysql, pymysql.cursors # https://pymysql.readthedocs.io/
+import deepdiff # http://deepdiff.readthedocs.io/
 
 
 class LogMessage(object):
@@ -49,6 +50,28 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 	next(coro)
 	return coro
 
+class adict(dict):
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self.__dict__ = self
+	def __setattr__(self, k, v):
+		if k.startswith('_'): super().__setattr__(k, v)
+		self[k] = v
+
+def dts_parse(dts_str):
+	if ':' not in dts_str: return float(dts_str)
+	dts_vals = dts_str.split(':')
+	if len(dts_vals) == 2: dts_vals.append('00')
+	assert len(dts_vals) == 3, dts_vals
+	return sum(int(n)*k for k, n in zip([3600, 60, 1], dts_vals))
+
+def dts_format(dts):
+	if isinstance(dts, str): return dts
+	if isinstance(dts, datetime.timedelta): dts = dts.total_seconds()
+	dts_days, dts = divmod(int(dts), 24 * 3600)
+	dts = str(datetime.time(dts // 3600, (dts % 3600) // 60, dts % 60, dts % 1))
+	if dts_days: dts = '{}+{}'.format(dts_days, dts)
+	return dts
 
 
 class NTCursor(pymysql.cursors.SSDictCursor):
@@ -206,6 +229,75 @@ class GTFSDB:
 
 		self.commit()
 
+	def compare(self, db1, db2, trip_limit=None):
+		log, dbs = self.log, (db1, db2)
+
+		diff_func = deepdiff.DeepDiff
+		diff_print = ft.partial(pprint.pprint, indent=2)
+
+		tuid_sets = tuple(
+			set(map( op.itemgetter(0),
+				self.q(f'SELECT DISTINCT(trip_headsign) FROM {db}.trips') ))
+			for db in dbs )
+		tuid_intersect = tuid_sets[0] & tuid_sets[1]
+		for n,m in (0,1), (1,0):
+			tuid_diff = tuid_sets[n].difference(tuid_sets[m])
+			if not tuid_diff: continue
+			log.info(
+				'[{}] has trips for extra {:,} train_uid entries ({:,} same)',
+				dbs[n], len(tuid_diff), len(tuid_intersect) )
+
+		tuid_check = list(tuid_intersect)
+		random.shuffle(tuid_check, lambda: 0.7401007202888102)
+		tuid_check = tuid_check[:trip_limit or 2**30]
+		log.debug('Comparing trips/stops for {} train_uids...', len(tuid_check))
+
+		for train_uid in tuid_check:
+			log.debug('Comparing data for train_uid={}...', train_uid)
+			stats = dict((db, collections.Counter()) for db in dbs)
+			trip_info = dict((db, adict()) for db in dbs)
+
+			# Populate trip_info
+			for db in dbs:
+				trip_span_idx, trip_stop_idx = collections.defaultdict(set), dict()
+				trip_info[db].spans, trip_info[db].stops = trip_span_idx, trip_stop_idx
+				trips = list(self.q(f'''
+					SELECT
+						t.trip_id,
+						t.service_id AS svc_id,
+						st.stop_id AS id,
+						st.stop_sequence AS seq,
+						st.arrival_time AS ts_arr,
+						st.departure_time AS ts_dep
+					FROM {db}.trips t
+					LEFT JOIN {db}.stop_times st USING(trip_id)
+					WHERE t.trip_headsign = %s
+					ORDER BY t.trip_id, st.stop_sequence''', train_uid))
+				for trip_id, stops in it.groupby(trips, op.attrgetter('trip_id')):
+					trip = next(stops)
+					stops, trip_stops = [trip, *stops], list()
+					for st in stops:
+						if not (st.ts_arr or st.ts_dep):
+							stats[db]['stop-no-times'] += 1
+							continue
+						ts_arr = dts_format(st.ts_arr or st.ts_dep)
+						ts_dep = dts_format(st.ts_dep or st.ts_arr)
+						trip_stops.append((st.id, ts_arr, ts_dep))
+					trip_stops, trip_hash = tuple(trip_stops), hash(tuple(trip_stops))
+					# if trip_hash in trip_stop_idx: stats[db]['trip-dup-stops'] += 1
+					# if trip.svc_id in trip_span_idx[trip_hash]: stats[db]['trip-dup-svc'] += 1
+					trip_span_idx[trip_hash].add(trip.svc_id)
+					trip_stop_idx[trip_hash] = trip_stops
+
+			log.debug('Comparing trip-stops for train_uid={}...', train_uid)
+			diff = diff_func(*(set(trip_info[db].stops.values()) for db in dbs))
+			if diff:
+				log.info('Stop sequence(s) mismatch for train_uid: {}', train_uid)
+				diff_print(diff)
+
+			for db in dbs:
+				for k, v in stats[db].items(): log.info('[{}] Quirk count: {}={}', db, k, v)
+
 
 def main(args=None):
 	import argparse
@@ -240,11 +332,13 @@ def main(args=None):
 	cmd = cmds.add_parser('compare', help='Compare data between two mysql dbs.')
 	cmd.add_argument('db1', help='Database-1 to compare Database-2 against.')
 	cmd.add_argument('db2', help='Database-2 to compare Database-1 against.')
+	cmd.add_argument('-n', '--trip-limit', metavar='n', type=int,
+		help='Stop after comparing specified number of trips.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
-	logging.basicConfig(
-		level=logging.DEBUG if opts.debug else logging.WARNING,
+	logging.basicConfig( stream=sys.stdout,
+		level=logging.DEBUG if opts.debug else logging.INFO,
 		format='%(asctime)s :: %(name)s %(levelname)s :: %(message)s' )
 	log = get_logger('main')
 
@@ -255,7 +349,8 @@ def main(args=None):
 		if opts.call == 'import':
 			db.parse(opts.db_name, opts.src_path, opts.gtfs_schema)
 
-		# elif opts.call == 'compare': pass
+		elif opts.call == 'compare':
+			db.compare(opts.db1, opts.db2, opts.trip_limit)
 
 		else: parser.error(f'Action not implemented: {opts.call}')
 
