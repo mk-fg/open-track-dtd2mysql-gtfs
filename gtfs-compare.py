@@ -413,7 +413,7 @@ class GTFSDB:
 						span = GTFSTimespan(svc.a, svc.b, tuple(map(int, svc.days)), exc_days)
 						svc_days.update(it.chain(span.date_iter(), extra_days))
 						svc_spans.append((span, extra_days))
-					db_days.append(set(map(str, svc_days)))
+					db_days.append(set(svc_days))
 					db_spans.append(svc_spans)
 				days1, days2 = db_days
 				diff = diff_func(days1, days2)
@@ -432,25 +432,29 @@ class GTFSDB:
 							extra_days = ( '' if not extra_days else
 								'{{{}}}'.format(', '.join(map(str, sorted(extra_days)))) )
 							print(f'      {span}{extra_days}')
-					print(f'  diffs: {db1:^10s}  {db2:^10s}')
-					print('         ----------  ----------')
+					print(f'  diffs: {db1:^14}  {db2:^14}')
+					print('         --------------  --------------')
 					for day in sorted(it.chain.from_iterable(
 							map(op.attrgetter(k), days) for k,days in zip(['t2', 't1'], [
 								diff.get('set_item_added', list()),
 								diff.get('set_item_removed', list()) ]) if days )):
-						print('         {:^10}  {:^10}'.format(
-							*((day if day in days else '') for days in [days1, days2]) ))
+						print('         {:^14}  {:^14}'.format(*(
+							('{} [{}]'.format(day, day.weekday()+1) if day in days else '')
+							for days in [days1, days2] )))
 					if cif_db:
 						print('  cif schedules (for reference):')
 						for s in self.q(f'''
 								SELECT
-									id, stp_indicator AS stp, runs_from AS a , runs_to AS b,
+									id, stp_indicator AS stp,
+									runs_from AS a , runs_to AS b, bank_holiday_running AS always,
 									CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
 								FROM {cif_db}.schedule
 								WHERE train_uid = %s
 								ORDER BY FIELD(stp_indicator,'P','N','O','C'), id''', train_uid):
 							days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
-							print(f'    {s.id:>7d} {s.stp} {s.a} {s.b} {days}')
+							print(
+								f'    {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
+								'no-holidays' if s.always else '' )
 
 			for db in dbs:
 				for k, v in stats[db].items(): log.info('[{}] Quirk count: {}={}', db, k, v)
