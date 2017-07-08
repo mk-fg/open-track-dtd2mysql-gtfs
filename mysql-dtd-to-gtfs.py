@@ -124,10 +124,11 @@ class GTFSTimespan:
 	day = datetime.timedelta(days=1)
 
 	def __init__(self, start, end, weekdays=None, except_days=None):
-		assert all(isinstance(d, datetime.date) for d in it.chain([start, end], except_days or list()))
-		self.start, self.end = start, end
+		self.start, self.end, self.except_days = start, end, set(except_days or list())
+		# assert all( isinstance(d, datetime.date)
+		# 	for d in it.chain([self.start, self.end], self.except_days or list()) )
 		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
-		self.weekdays, self.except_days = tuple(map(int, weekdays)), set(except_days or list())
+		self.weekdays = tuple(map(int, weekdays))
 		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
 		except StopIteration: raise GTFSTimespanInvalid(str(self))
 		self.except_days = frozenset(filter(
@@ -159,7 +160,7 @@ class GTFSTimespan:
 			ed=except_days or set(): wd[day.weekday()] and day not in ed )
 		for day in filter(svc_day_check, iter_range(a, b, cls.day)): yield day
 
-	def merge(self, span, exc_days_to_split=5):
+	def merge(self, span, exc_days_to_split=10):
 		'''Return new merged timespan or None if it's not possible.
 			Simple algo here only merges overlapping or close intervals with same weekdays.
 			exc_days_to_split = number of days in sequence
