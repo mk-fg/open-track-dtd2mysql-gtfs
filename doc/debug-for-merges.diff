@@ -1,8 +1,8 @@
 diff --git a/mysql-dtd-to-gtfs.py b/mysql-dtd-to-gtfs.py
-index f3498c9..7161de4 100755
+index 745d28c..b5cc8ba 100755
 --- a/mysql-dtd-to-gtfs.py
 +++ b/mysql-dtd-to-gtfs.py
-@@ -533,13 +533,21 @@ class DTDtoGTFS:
+@@ -548,13 +548,21 @@ class DTDtoGTFS:
  
  				### Trip deduplication
  
@@ -24,7 +24,7 @@ index f3498c9..7161de4 100755
  
  				### Insert new gtfs.trip (and its stop_times)
  
-@@ -608,8 +616,16 @@ class DTDtoGTFS:
+@@ -623,8 +631,16 @@ class DTDtoGTFS:
  		trip_svc_ids = dict() # {trip_id: svc_id_list}
  
  		self.log.debug('Merging service timespans for {} gtfs.trips...', len(trip_svc_timespans))
@@ -34,23 +34,24 @@ index f3498c9..7161de4 100755
  		for trip_id, spans in trip_svc_timespans.items():
  			spans = spans_pre = trip_svc_ids[trip_id] = spans.copy()
 +			print(f'+++ trip {trip_id}')
-+			if len(spans) == 1: print(f'  spans:', span)
++			if len(spans) == 1: print(f'  span:', spans[0])
 +			else:
 +				print(f'  spans:')
 +				for span in sorted(spans): print('    ', span)
  
  			### Merge timespans where possible
  			if len(spans) > 1:
-@@ -621,11 +637,19 @@ class DTDtoGTFS:
- 						merged = s1.merge(s2)
- 						if merged:
+@@ -636,12 +652,20 @@ class DTDtoGTFS:
+ 						merge = s1.merge(s2)
+ 						if merge.t:
  							spans.difference_update([s1, s2])
 +							s1, s2 = sorted([s1, s2])
 +							print('  merge:')
 +							print(f'    {s1} + {s2}')
-+							print(f'    = {merged}')
- 							spans.add(merged)
++							print(f'    = {merge.span} [{merge.t.name}]')
+ 							spans.add(merge.span)
  							self.stats['svc-merge-op'] += 1
+ 							self.stats[f'svc-merge-op-{merge.t.name}'] += 1
  					if len(spans) == spans_before: break
  				spans = trip_svc_ids[trip_id] = list(spans)
 -				if len(spans) != len(spans_pre): self.stats['svc-merge'] += 1

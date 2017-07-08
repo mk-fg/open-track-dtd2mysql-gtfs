@@ -113,6 +113,9 @@ GTFSRouteType = enum.IntEnum( 'RouteType',
 GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0)
 GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 
+GTFSTSMerge = collections.namedtuple('TSMerge', 't span')
+GTFSTSMergeType = enum.IntEnum( 'TSMergeType',
+	'none same inc inc_diff_weekdays overlap bridge', start=0 )
 
 class GTFSTimespanInvalid(Exception): pass
 class GTFSTimespanEmpty(Exception): pass
@@ -125,15 +128,18 @@ class GTFSTimespan:
 
 	def __init__(self, start, end, weekdays=None, except_days=None):
 		self.start, self.end, self.except_days = start, end, set(except_days or list())
-		# assert all( isinstance(d, datetime.date)
-		# 	for d in it.chain([self.start, self.end], self.except_days or list()) )
 		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
 		self.weekdays = tuple(map(int, weekdays))
 		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
 		except StopIteration: raise GTFSTimespanInvalid(str(self))
 		self.except_days = frozenset(filter(
 			lambda day: start <= day <= end and self.weekdays[day.weekday()], self.except_days ))
-		self._hash_tuple = self.start, self.end, self.weekdays, self.except_days
+		# self.end is negated in hash_tuple so that largest interval with same start is sorted first
+		self._hash_tuple = (
+			self._date_int(self.start), -self._date_int(self.end), self.weekdays, self.except_days )
+
+	def _date_int(self, day):
+		return day.year*10000 + day.month*100 + day.day
 
 	def __lt__(self, span): return self._hash_tuple < span._hash_tuple
 	def __eq__(self, span): return self._hash_tuple == span._hash_tuple
@@ -161,26 +167,33 @@ class GTFSTimespan:
 		for day in filter(svc_day_check, iter_range(a, b, cls.day)): yield day
 
 	def merge(self, span, exc_days_to_split=10):
-		'''Return new merged timespan or None if it's not possible.
-			Simple algo here only merges overlapping or close intervals with same weekdays.
+		'''Return GTFSTSMerge value,
+				with either new merged timespan or None if it's not possible.
 			exc_days_to_split = number of days in sequence
 				to tolerate as exceptions when merging two spans with small gap in-between.'''
-		if self.weekdays != span.weekdays: return
 		s1, s2, weekdays = self, span, self.weekdays
-		if s1 == s2: return s1
-		if s1 > s2: s1, s2 = s2, s1
-		if s1.end >= s2.start: # overlap
-			a, b = s2.start, min(s1.end, s2.end) # range of overlapping dates
-			exc_intersect = s1.except_days & s2.except_days
-			return GTFSTimespan(
-				s1.start, max(s1.end, s2.end), weekdays, filter(
-					lambda day: (day < a or day > b) or day in exc_intersect,
-					s1.except_days | s2.except_days ) )
-		if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split:
-			return GTFSTimespan(
-				s1.start, max(s1.end, s2.end), weekdays,
-				set( s1.except_days | s2.except_days |
-					set(self.date_range(s1.end + self.day, s2.start - self.day, weekdays)) ) )
+		if s1 > s2: s1, s2 = s2, s1 # s1 starts first and ends last if start is same
+		if s1.weekdays != s2.weekdays:
+			# Check if s1 includes s2 range and all its weekdays
+			if ( s1.start <= s2.start and s1.end >= s2.end
+					and tuple(d1|d2 for d1,d2 in zip(s1.weekdays, s2.weekdays)) == s1.weekdays
+					and s1.except_days.issuperset(s2.except_days) ):
+				return GTFSTSMerge(GTFSTSMergeType.inc_diff_weekdays, s1)
+		else:
+			if s1 == s2: return GTFSTSMerge(GTFSTSMergeType.same, s1)
+			if s1.end >= s2.start: # overlap
+				a, b = s2.start, min(s1.end, s2.end) # range of overlapping dates
+				exc_intersect = s1.except_days & s2.except_days
+				return GTFSTSMerge(GTFSTSMergeType.overlap, GTFSTimespan(
+					s1.start, max(s1.end, s2.end), weekdays, filter(
+						lambda day: (day < a or day > b) or day in exc_intersect,
+						s1.except_days | s2.except_days ) ))
+			if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split:
+				return GTFSTSMerge(GTFSTSMergeType.bridge, GTFSTimespan(
+					s1.start, max(s1.end, s2.end), weekdays,
+					set( s1.except_days | s2.except_days |
+						set(self.date_range(s1.end + self.day, s2.start - self.day, weekdays)) ) ))
+		return GTFSTSMerge(GTFSTSMergeType.none, None)
 
 	def difference(self, span):
 		'''Return new timespan with passed span excluded from it.
@@ -620,11 +633,12 @@ class DTDtoGTFS:
 					spans_before = len(spans)
 					for s1, s2 in list(it.combinations(spans, 2)):
 						if not spans.issuperset([s1, s2]): continue
-						merged = s1.merge(s2)
-						if merged:
+						merge = s1.merge(s2)
+						if merge.t:
 							spans.difference_update([s1, s2])
-							spans.add(merged)
+							spans.add(merge.span)
 							self.stats['svc-merge-op'] += 1
+							self.stats[f'svc-merge-op-{merge.t.name}'] += 1
 					if len(spans) == spans_before: break
 				spans = trip_svc_ids[trip_id] = list(spans)
 				if len(spans) != len(spans_pre): self.stats['svc-merge'] += 1
