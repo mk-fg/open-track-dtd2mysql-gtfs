@@ -296,7 +296,7 @@ class DTDtoGTFS:
 	def qb(self, q, *params, c=None, fetch=True, **kws):
 		'Query with buffered results.'
 		res = self.q(q, *params, c=c or 'exec', fetch=fetch, **kws)
-		return res if not fetch else list(res)
+		return res if not fetch else (res and list(res))
 
 	def insert(self, table, **row):
 		if self.db_noop: return
