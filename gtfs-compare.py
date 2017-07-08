@@ -21,7 +21,23 @@ class LogStyleAdapter(logging.LoggerAdapter):
 		msg, kws = self.process(msg, kws)
 		self.logger._log(level, LogMessage(msg, args, kws), (), log_kws)
 
+class LogStdoutHandler(logging.StreamHandler):
+	def __init__(self): super().__init__(sys.stdout)
+	def flush(self):
+		self.acquire()
+		try: self.stream.flush()
+		except BrokenPipeError: pass
+		finally: self.release()
+	def close(self):
+		self.acquire()
+		try: self.stream.close()
+		except BrokenPipeError: pass
+		finally:
+			super().close()
+			self.release()
+
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
+
 
 def progress_iter(log, prefix, n_max, steps=30, n=0):
 	'''Returns progress logging coroutine for long calculations.
@@ -283,7 +299,8 @@ class GTFSDB:
 		self.commit()
 
 	def compare( self, db1, db2,
-			train_uid_limit=None, stop_after_train_uid_mismatch=False ):
+			train_uid_skip=None, train_uid_limit=None,
+			stop_after_train_uid_mismatch=False ):
 		log, dbs = self.log, (db1, db2)
 
 		diff_func = ft.partial(deepdiff.DeepDiff, view='tree')
@@ -309,6 +326,10 @@ class GTFSDB:
 		log.debug('Comparing trips/stops for {} train_uids...', len(tuid_check))
 
 		for train_uid in tuid_check:
+			if train_uid_skip:
+				if train_uid == train_uid_skip: train_uid_skip = None
+				continue
+
 			log.debug('Comparing data for train_uid={}...', train_uid)
 			diff_found, stats = False, dict((db, collections.Counter()) for db in dbs)
 			trip_info = dict((db, adict()) for db in dbs)
@@ -459,6 +480,8 @@ def main(args=None):
 	cmd = cmds.add_parser('compare', help='Compare data between two mysql dbs.')
 	cmd.add_argument('db1', help='Database-1 to compare Database-2 against.')
 	cmd.add_argument('db2', help='Database-2 to compare Database-1 against.')
+	cmd.add_argument('-s', '--train-uid-skip', metavar='train_uid',
+		help='Skip to diff right after specified train_uid (incl. all diffs before it).')
 	cmd.add_argument('-n', '--train-uid-limit', metavar='n', type=int,
 		help='Stop after comparing data for specified number of train_uids.')
 	cmd.add_argument('-x', '--stop-after-train-uid-mismatch',
@@ -466,7 +489,7 @@ def main(args=None):
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
-	logging.basicConfig( stream=sys.stdout,
+	logging.basicConfig( handlers=[LogStdoutHandler()],
 		level=logging.DEBUG if opts.debug else logging.INFO,
 		format='%(asctime)s :: %(name)s %(levelname)s :: %(message)s' )
 	log = get_logger('main')
@@ -480,7 +503,8 @@ def main(args=None):
 
 		elif opts.call == 'compare':
 			db.compare(
-				opts.db1, opts.db2, train_uid_limit=opts.train_uid_limit,
+				opts.db1, opts.db2,
+				train_uid_skip=opts.train_uid_skip, train_uid_limit=opts.train_uid_limit,
 				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch )
 
 		else: parser.error(f'Action not implemented: {opts.call}')
