@@ -298,7 +298,7 @@ class GTFSDB:
 
 		self.commit()
 
-	def compare( self, db1, db2,
+	def compare( self, db1, db2, cif_db=None,
 			train_uid_skip=None, train_uid_limit=None,
 			stop_after_train_uid_mismatch=False ):
 		log, dbs = self.log, (db1, db2)
@@ -398,7 +398,7 @@ class GTFSDB:
 					calendars = self.q(f'''
 						SELECT
 							service_id AS id, start_date AS a, end_date AS b,
-							concat(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
+							CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
 							date, exception_type AS exc
 						FROM {db}.calendar c
 						LEFT JOIN {db}.calendar_dates cd USING(service_id)
@@ -440,7 +440,17 @@ class GTFSDB:
 								diff.get('set_item_removed', list()) ]) if days )):
 						print('         {:^10}  {:^10}'.format(
 							*((day if day in days else '') for days in [days1, days2]) ))
-
+					if cif_db:
+						print('  cif schedules (for reference):')
+						for s in self.q(f'''
+								SELECT
+									id, stp_indicator AS stp, runs_from AS a , runs_to AS b,
+									CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
+								FROM {cif_db}.schedule
+								WHERE train_uid = %s
+								ORDER BY FIELD(stp_indicator,'P','N','O','C'), id''', train_uid):
+							days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
+							print(f'    {s.id:>7d} {s.stp} {s.a} {s.b} {days}')
 
 			for db in dbs:
 				for k, v in stats[db].items(): log.info('[{}] Quirk count: {}={}', db, k, v)
@@ -480,6 +490,8 @@ def main(args=None):
 	cmd = cmds.add_parser('compare', help='Compare data between two mysql dbs.')
 	cmd.add_argument('db1', help='Database-1 to compare Database-2 against.')
 	cmd.add_argument('db2', help='Database-2 to compare Database-1 against.')
+	cmd.add_argument('-c', '--cif-db', metavar='db-name',
+		help='Name of CIF database to pull/display reference data from on mismatches.')
 	cmd.add_argument('-s', '--train-uid-skip', metavar='train_uid',
 		help='Skip to diff right after specified train_uid (incl. all diffs before it).')
 	cmd.add_argument('-n', '--train-uid-limit', metavar='n', type=int,
@@ -503,7 +515,7 @@ def main(args=None):
 
 		elif opts.call == 'compare':
 			db.compare(
-				opts.db1, opts.db2,
+				opts.db1, opts.db2, cif_db=opts.cif_db,
 				train_uid_skip=opts.train_uid_skip, train_uid_limit=opts.train_uid_limit,
 				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch )
 

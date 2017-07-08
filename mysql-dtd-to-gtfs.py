@@ -438,7 +438,7 @@ class DTDtoGTFS:
 			LEFT JOIN {self.db_cif}.stop_time st ON st.schedule = s.id
 			LEFT JOIN {self.db_cif}.tiploc t ON t.tiploc_code = st.location
 			WHERE t.crs_code IS NOT NULL AND t.description IS NOT NULL
-			ORDER BY s.train_uid, FIELD(s.stp_indicator, "P", "N", "O", "C"), s.id, st.id'''
+			ORDER BY s.train_uid, FIELD(s.stp_indicator,'P','N','O','C'), s.id, st.id'''
 		(sched_count,), = self.q(f'SELECT COUNT(*) FROM {self.db_cif}.schedule s {train_uid_slice}')
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
 		schedules = self.q(schedules)
