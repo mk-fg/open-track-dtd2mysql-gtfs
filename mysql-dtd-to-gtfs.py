@@ -673,7 +673,7 @@ class DTDtoGTFS:
 					self.stats['trip-row-dup-op'] += 1
 					trip_id = next(trip_id_seq)
 					if self.db_noop: continue
-					trip['trip_id'] = trip_id
+					trip.update(trip_id=trip_id, service_id=svc_id)
 					self.insert('gtfs.trips', **trip)
 					for st in trip_stops:
 						st['trip_id'] = trip_id
