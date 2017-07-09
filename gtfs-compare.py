@@ -298,7 +298,7 @@ class GTFSDB:
 
 		self.commit()
 
-	def compare( self, db1, db2, cif_db=None, train_uid_limit=None,
+	def compare( self, db1, db2, cif_db=None, train_uid_limit=None, skip_holidays=None,
 			train_uid_seek=None, train_uid_next=False, stop_after_train_uid_mismatch=False ):
 		log, dbs = self.log, (db1, db2)
 
@@ -417,6 +417,11 @@ class GTFSDB:
 					db_spans.append(svc_spans)
 				days1, days2 = db_days
 				diff = diff_func(days1, days2)
+				diff_days = sorted(it.chain.from_iterable(
+					map(op.attrgetter(k), days) for k,days in zip(['t2', 't1'], [
+						diff.get('set_item_added', list()),
+						diff.get('set_item_removed', list()) ]) if days ))
+				if skip_holidays and skip_holidays.issuperset(diff_days): diff = None
 				if diff:
 					diff_found |= True
 					log.info('Calendars mismatch for train_uid: {}', train_uid)
@@ -504,6 +509,11 @@ def main(args=None):
 		help='Stop after comparing data for specified number of train_uids.')
 	cmd.add_argument('-1', '--stop-after-train-uid-mismatch',
 		action='store_true', help='Stop after encountering first mismatch for train_uid data.')
+	cmd.add_argument('--skip-bank-holiday-diffs', metavar='holiday-file',
+		help='Skip diffs that only have bank-holiday dates from specified list file.')
+	cmd.add_argument('--skip-bank-holiday-fmt',
+		metavar='strptime-format', default='%d-%b-%Y',
+		help='strptime() format for each line in --skip-bank-holiday-diffs file. Default: %(default)s')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
@@ -520,8 +530,14 @@ def main(args=None):
 			db.parse(opts.db_name, opts.src_path, opts.gtfs_schema)
 
 		elif opts.call == 'compare':
+			skip_holidays = set()
+			if opts.skip_bank_holiday_diffs:
+				with pathlib.Path(opts.skip_bank_holiday_diffs).open() as src:
+					for line in src.read().splitlines(): skip_holidays.add(
+						datetime.datetime.strptime(line, opts.skip_bank_holiday_fmt).date() )
 			db.compare(
-				opts.db1, opts.db2, cif_db=opts.cif_db, train_uid_limit=opts.train_uid_limit,
+				opts.db1, opts.db2, cif_db=opts.cif_db,
+				train_uid_limit=opts.train_uid_limit, skip_holidays=skip_holidays,
 				train_uid_seek=opts.train_uid_seek, train_uid_next=opts.train_uid_seek_next,
 				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch )
 
