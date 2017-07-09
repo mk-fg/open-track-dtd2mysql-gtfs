@@ -154,6 +154,7 @@ class GTFSTimespan:
 
 
 def dts_format(dts, sec=False):
+	if dts is None: return '--:--'
 	if isinstance(dts, str): return dts
 	if isinstance(dts, datetime.timedelta): dts = dts.total_seconds()
 	dts_days, dts = divmod(int(dts), 24 * 3600)
@@ -387,6 +388,24 @@ class GTFSDB:
 				else:
 					print('--- [{train_uid}] Multiple/mismatched changes:')
 					diff_print(diff)
+				if cif_db:
+					print('cif schedules/stops (for reference):')
+					for s in self.q(f'''
+							SELECT
+								s.id, stp_indicator AS stp,
+								runs_from AS a , runs_to AS b, bank_holiday_running AS always,
+								CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
+								crs_code, public_arrival_time AS ts_arr, public_departure_time AS ts_dep
+							FROM {cif_db}.schedule s
+							LEFT JOIN {cif_db}.stop_time st ON st.schedule = s.id
+							LEFT JOIN {cif_db}.tiploc t ON t.tiploc_code = st.location
+							WHERE train_uid = %s AND (st.id IS NULL OR t.crs_code IS NOT NULL)
+							ORDER BY FIELD(stp_indicator,'P','N','O','C'), s.id, st.id''', train_uid):
+						days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
+						print(
+							f'  {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
+							'A' if s.always else ' ', s.crs_code or '---',
+							dts_format(s.ts_arr), dts_format(s.ts_dep) )
 
 
 			log.debug('Comparing trip calendars for train_uid={}...', train_uid)
