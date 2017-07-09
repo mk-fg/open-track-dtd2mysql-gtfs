@@ -108,6 +108,17 @@ class ConversionError(Exception): pass
 class CIFError(ConversionError): pass
 
 
+one_day = datetime.timedelta(days=1)
+
+def dts_format(dts, sec=False):
+	if isinstance(dts, str): return dts
+	if isinstance(dts, datetime.timedelta): dts = dts.total_seconds()
+	dts_days, dts = divmod(int(dts), 24 * 3600)
+	dts = str(datetime.time(dts // 3600, (dts % 3600) // 60, dts % 60, dts % 1))
+	if not sec: dts = dts.rsplit(':', 1)[0]
+	if dts_days: dts = '{}+{}'.format(dts_days, dts)
+	return dts
+
 GTFSRouteType = enum.IntEnum( 'RouteType',
 	'light_rail subway rail bus ferry cable_car gondola funicular spacecraft', start=0 )
 GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0)
@@ -124,7 +135,6 @@ class GTFSTimespanEmpty(Exception): pass
 class GTFSTimespan:
 
 	weekday_order = 'monday tuesday wednesday thursday friday saturday sunday'.split()
-	day = datetime.timedelta(days=1)
 
 	def __init__(self, start, end, weekdays=[1]*7, except_days=None):
 		self.start, self.end, self.except_days = start, end, set(except_days or list())
@@ -158,13 +168,13 @@ class GTFSTimespan:
 		return self.date_range( self.start, self.end,
 			self.weekdays, self.except_days, reverse=reverse )
 
-	@classmethod
-	def date_range(cls, a, b, weekdays=None, except_days=None, reverse=False):
+	@staticmethod
+	def date_range(a, b, weekdays=None, except_days=None, reverse=False):
 		if a > b: return
 		if reverse: a, b = b, a
 		svc_day_check = ( lambda day, wd=weekdays or [1]*7,
 			ed=except_days or set(): wd[day.weekday()] and day not in ed )
-		for day in filter(svc_day_check, iter_range(a, b, cls.day)): yield day
+		for day in filter(svc_day_check, iter_range(a, b, one_day)): yield day
 
 	@staticmethod
 	def exc_days_overlap(s1, s2):
@@ -197,7 +207,7 @@ class GTFSTimespan:
 				return GTFSTSMerge(GTFSTSMergeType.bridge, GTFSTimespan(
 					s1.start, max(s1.end, s2.end), weekdays,
 					set( s1.except_days | s2.except_days |
-						set(self.date_range(s1.end + self.day, s2.start - self.day, weekdays)) ) ))
+						set(self.date_range(s1.end + one_day, s2.start - one_day, weekdays)) ) ))
 		return GTFSTSMerge(GTFSTSMergeType.none, None)
 
 	def difference(self, span):
@@ -219,13 +229,13 @@ class GTFSTimespan:
 		start, end = self.start, self.end
 		if day_from > start and day_to < end: # splits timespan in two
 			return [
-				GTFSTimespan(start, day_from - self.day, self.weekdays, self.except_days),
-				GTFSTimespan(day_to + self.day, end, self.weekdays, self.except_days) ]
+				GTFSTimespan(start, day_from - one_day, self.weekdays, self.except_days),
+				GTFSTimespan(day_to + one_day, end, self.weekdays, self.except_days) ]
 		if day_from <= start and day_to >= end: # full overlap
 			raise GTFSTimespanEmpty('Empty timespan result')
 		# Adjust start or end of timespan
-		if day_from <= start: start = day_to + self.day
-		if day_to >= end: end = day_from - self.day
+		if day_from <= start: start = day_to + one_day
+		if day_to >= end: end = day_from - one_day
 		return [GTFSTimespan(start, end, self.weekdays, self.except_days)]
 
 
@@ -513,7 +523,6 @@ class DTDtoGTFS:
 					if s.stp_indicator == 'C': continue
 
 				### Processing for trip stops
-				# XXX: make sure ordering here is correct
 				if s.location is None or s.tiploc_code is None:
 					# self.log.info('Skipping schedule with no usable stops: {}', s)
 					self.stats['sched-without-stops'] += 1
@@ -521,7 +530,8 @@ class DTDtoGTFS:
 
 				trip_hash, trip_stops = [s.train_uid], list()
 
-				# XXX: time conversions - DTD->GTFS and late->next-day
+				# XXX: time conversions - DTD->GTFS
+				ts_prev, ts_origin, ts_bug = None, None, set()
 				for st in stops:
 					public_stop = st.public_arrival_time or st.public_departure_time
 					if public_stop:
@@ -535,8 +545,23 @@ class DTDtoGTFS:
 					# XXX: not sure if stops without time should be skipped like that, maybe use averages?
 					if not (ts_arr and ts_dep): continue
 
+					# Midnight rollover and sanity check
+					if not ts_origin: ts_origin = ts_dep
+					elif ts_prev > ts_dep:
+						if not ( ts_origin.total_seconds() >= 4*3600
+							and ts_origin > ts_dep ): ts_bug.add(st.location)
+						ts_arr, ts_dep = ts_arr + one_day, ts_dep + one_day
+					ts_prev = ts_dep
+
 					trip_stops.append((st, pickup_type, ts_arr, ts_dep))
 					trip_hash.append((st.crs_code, ts_arr.total_seconds(), ts_dep.total_seconds()))
+
+				if ts_bug:
+					log_lines(self.log.warning,
+						[ 'Potential ordering bug in stop sequence:',
+							*( ( f'  {n:>02d} {st.crs_code} {dts_format(ts_arr)} {dts_format(ts_dep)}{{}}',
+									' <-- bug here' if st.location in ts_bug else '' )
+								for n, (st, _, ts_arr, ts_dep) in enumerate(trip_stops) ) ])
 
 				### Trip deduplication
 
