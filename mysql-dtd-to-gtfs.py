@@ -116,6 +116,8 @@ GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 GTFSTSMerge = collections.namedtuple('TSMerge', 't span')
 GTFSTSMergeType = enum.IntEnum( 'TSMergeType',
 	'none same inc inc_diff_weekdays overlap bridge', start=0 )
+GTFSTSDiff = collections.namedtuple('TSDiff', 't span')
+GTFSTSDiffType = enum.IntEnum('TSDiffType', 'none cut exc', start=0)
 
 class GTFSTimespanInvalid(Exception): pass
 class GTFSTimespanEmpty(Exception): pass
@@ -199,20 +201,25 @@ class GTFSTimespan:
 		'''Return new timespan with passed span excluded from it.
 			GTFSTimespanEmpty is raised if passed span completely overlaps this one.'''
 		assert not span.except_days # should be empty for stp=C entries anyway
+		if self.start > span.end or self.end < span.start: # no overlap
+			return GTFSTSDiff(GTFSTSDiffType.none, None)
 		if ( self.weekdays == span.weekdays
 				and not (span.start > self.start and span.end < self.end) ):
 			# Adjust start/end of the timespan
 			start, end = self.start, self.end
-			if span.start <= self.start: start = span.end
-			if span.end >= self.end: end = span.start
+			if span.start <= self.start: start = span.end + self.day
+			if span.end >= self.end: end = span.start - self.day
 			if start > end: raise GTFSTimespanEmpty('Empty timespan result')
-			return GTFSTimespan(start, end, self.weekdays, self.except_days)
-		# Otherwise just add as exception days
+			return GTFSTSDiff( GTFSTSDiffType.cut,
+				GTFSTimespan(start, end, self.weekdays, self.except_days) )
+		# Just add as exception days
 		try:
-			return GTFSTimespan( self.start, self.end,
+			span_diff = GTFSTimespan( self.start, self.end,
 				self.weekdays, self.except_days | frozenset(span.date_iter()) )
 		except GTFSTimespanInvalid:
 			raise GTFSTimespanEmpty('Empty timespan result') from None
+		if span_diff == self: return GTFSTSDiff(GTFSTSDiffType.none, None)
+		return GTFSTSDiff(GTFSTSDiffType.exc, span_diff)
 
 	def subtract_days(self, day_from, day_to):
 		'''Return list of new timespans from this one without
@@ -451,7 +458,7 @@ class DTDtoGTFS:
 			LEFT JOIN {self.db_cif}.schedule_extra e ON e.schedule = s.id
 			LEFT JOIN {self.db_cif}.stop_time st ON st.schedule = s.id
 			LEFT JOIN {self.db_cif}.tiploc t ON t.tiploc_code = st.location
-			WHERE t.crs_code IS NOT NULL AND t.description IS NOT NULL
+			WHERE st.id IS NULL OR (t.crs_code IS NOT NULL AND t.description IS NOT NULL)
 			ORDER BY s.train_uid, FIELD(s.stp_indicator,'P','N','O','C'), s.id, st.id'''
 		(sched_count,), = self.q(f'SELECT COUNT(*) FROM {self.db_cif}.schedule s {train_uid_slice}')
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
@@ -504,16 +511,15 @@ class DTDtoGTFS:
 						spans = trip_svc_timespans[trip_id]
 						for n, span in enumerate(spans):
 							try:
-								span_diff = span.difference(svc_span)
-								if span_diff == span: continue # no intersection with this span
+								diff = span.difference(svc_span)
+								if not diff.t: continue # no intersection with this span
 							except GTFSTimespanEmpty: # span gets cancelled completely
 								spans[n] = None
 								self.stats['span-cancel-total'] += 1
 							else:
-								if span.weekdays != svc_span.weekdays:
-									self.stats['span-cancel-weekdays-diff'] += 1
-								spans[n] = span_diff
-								self.stats['span-cancel-part'] += 1
+								self.stats['span-cancel-op'] += 1
+								self.stats[f'span-cancel-op-{diff.t}'] += 1
+								spans[n] = diff.span
 						trip_svc_timespans[trip_id] = list(filter(None, spans))
 						span_diff_any = trip_svc_timespans[trip_id] == spans
 					if span_diff_any: self.stats['trip-cancel'] += 1
@@ -553,39 +559,38 @@ class DTDtoGTFS:
 					self.stats['trip-dedup'] += 1
 					trip_id = trip_merge_idx[trip_hash]
 					trip_svc_timespans[trip_id].append(svc_span)
-					continue
-				trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx) + 1
 
-				### Insert new gtfs.trip (and its stop_times)
-
-				## Route is created in an ad-hoc fashion here currently, just as a placeholder
-				# These are also deduplicated by start/end stops via route_merge_idx.
-				# XXX: note on route_ids? - "how to do routes? get the toc in from schedule_extra"
-				# XXX: optimize - merge/split same as services?
-				# XXX: route metadata
-				route_key = stops[0].id, stops[-1].id
-				if route_key in route_merge_idx: route_id = route_merge_idx[route_key]
 				else:
-					route_id = route_merge_idx[route_key] = len(route_merge_idx) + 1
-					self.insert( 'gtfs.routes',
-						route_id=route_id, route_type=int(GTFSRouteType.rail),
-						route_short_name=f'{stops[0].crs_code}-{stops[-1].crs_code}',
-						route_long_name='From {} to {}'.format(*(
-							(stops[n].description.title() or stops[n].crs_code) for n in [0, -1] )) )
+					trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx) + 1
 
-				# XXX: check if more trip/stop metadata can be filled-in here
-				self.insert( 'gtfs.trips',
-					trip_id=trip_id, route_id=route_id, service_id=0,
-					trip_headsign=s.train_uid, trip_short_name=s.retail_train_id )
-				for n, (st, pickup_type, ts_arr, ts_dep) in enumerate(trip_stops, 1):
-					self.insert( 'gtfs.stop_times',
-						trip_id=trip_id, pickup_type=int(pickup_type),
-						arrival_time=ts_arr, departure_time=ts_dep,
-						stop_id=st.crs_code, stop_sequence=n )
-				trip_svc_timespans[trip_id].append(svc_span)
-				train_trip_ids.add(trip_id)
+					## Route is created in an ad-hoc fashion here currently, just as a placeholder
+					# These are also deduplicated by start/end stops via route_merge_idx.
+					# XXX: note on route_ids? - "how to do routes? get the toc in from schedule_extra"
+					# XXX: optimize - merge/split same as services?
+					# XXX: route metadata
+					route_key = stops[0].id, stops[-1].id
+					if route_key in route_merge_idx: route_id = route_merge_idx[route_key]
+					else:
+						route_id = route_merge_idx[route_key] = len(route_merge_idx) + 1
+						self.insert( 'gtfs.routes',
+							route_id=route_id, route_type=int(GTFSRouteType.rail),
+							route_short_name=f'{stops[0].crs_code}-{stops[-1].crs_code}',
+							route_long_name='From {} to {}'.format(*(
+								(stops[n].description.title() or stops[n].crs_code) for n in [0, -1] )) )
 
-				### Special processing for stp=O/N (O/VAR/overlay, N/STP/Short-Term-Planned) entries
+					# XXX: check if more trip/stop metadata can be filled-in here
+					self.insert( 'gtfs.trips',
+						trip_id=trip_id, route_id=route_id, service_id=0,
+						trip_headsign=s.train_uid, trip_short_name=s.retail_train_id )
+					for n, (st, pickup_type, ts_arr, ts_dep) in enumerate(trip_stops, 1):
+						self.insert( 'gtfs.stop_times',
+							trip_id=trip_id, pickup_type=int(pickup_type),
+							arrival_time=ts_arr, departure_time=ts_dep,
+							stop_id=st.crs_code, stop_sequence=n )
+					trip_svc_timespans[trip_id].append(svc_span)
+					train_trip_ids.add(trip_id)
+
+				### Processing for stp=O/N (O/VAR/overlay, N/STP/Short-Term-Planned) entries
 				# If this trip is an overlay for previous schedule(s),
 				#  remove all runs_from-run_to days covered in its timespan from there.
 
