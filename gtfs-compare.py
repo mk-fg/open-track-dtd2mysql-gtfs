@@ -298,9 +298,8 @@ class GTFSDB:
 
 		self.commit()
 
-	def compare( self, db1, db2, cif_db=None,
-			train_uid_skip=None, train_uid_limit=None,
-			stop_after_train_uid_mismatch=False ):
+	def compare( self, db1, db2, cif_db=None, train_uid_limit=None,
+			train_uid_seek=None, train_uid_next=False, stop_after_train_uid_mismatch=False ):
 		log, dbs = self.log, (db1, db2)
 
 		diff_func = ft.partial(deepdiff.DeepDiff, view='tree')
@@ -326,9 +325,10 @@ class GTFSDB:
 		log.debug('Comparing trips/stops for {} train_uids...', len(tuid_check))
 
 		for train_uid in tuid_check:
-			if train_uid_skip:
-				if train_uid == train_uid_skip: train_uid_skip = None
-				continue
+			if train_uid_seek:
+				if train_uid != train_uid_seek: continue
+				train_uid_seek = None
+				if train_uid_next: continue
 
 			log.debug('Comparing data for train_uid={}...', train_uid)
 			diff_found, stats = False, dict((db, collections.Counter()) for db in dbs)
@@ -496,11 +496,13 @@ def main(args=None):
 	cmd.add_argument('db2', help='Database-2 to compare Database-1 against.')
 	cmd.add_argument('-c', '--cif-db', metavar='db-name',
 		help='Name of CIF database to pull/display reference data from on mismatches.')
-	cmd.add_argument('-s', '--train-uid-skip', metavar='train_uid',
-		help='Skip to diff right after specified train_uid (incl. all diffs before it).')
+	cmd.add_argument('-s', '--train-uid-seek', metavar='train_uid',
+		help='Skip to diff of specified train_uid (ignoring all diffs before it).')
+	cmd.add_argument('-x', '--train-uid-seek-next', action='store_true',
+		help='When using -s/--train-uid-seek, skip to diff for train_uid right after specified one.')
 	cmd.add_argument('-n', '--train-uid-limit', metavar='n', type=int,
 		help='Stop after comparing data for specified number of train_uids.')
-	cmd.add_argument('-x', '--stop-after-train-uid-mismatch',
+	cmd.add_argument('-1', '--stop-after-train-uid-mismatch',
 		action='store_true', help='Stop after encountering first mismatch for train_uid data.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -519,8 +521,8 @@ def main(args=None):
 
 		elif opts.call == 'compare':
 			db.compare(
-				opts.db1, opts.db2, cif_db=opts.cif_db,
-				train_uid_skip=opts.train_uid_skip, train_uid_limit=opts.train_uid_limit,
+				opts.db1, opts.db2, cif_db=opts.cif_db, train_uid_limit=opts.train_uid_limit,
+				train_uid_seek=opts.train_uid_seek, train_uid_next=opts.train_uid_seek_next,
 				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch )
 
 		else: parser.error(f'Action not implemented: {opts.call}')
