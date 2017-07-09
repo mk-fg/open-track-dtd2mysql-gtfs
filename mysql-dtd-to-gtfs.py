@@ -166,6 +166,14 @@ class GTFSTimespan:
 			ed=except_days or set(): wd[day.weekday()] and day not in ed )
 		for day in filter(svc_day_check, iter_range(a, b, cls.day)): yield day
 
+	@staticmethod
+	def exc_days_overlap(s1, s2):
+		a, b = s2.start, min(s1.end, s2.end)
+		exc_intersect = s1.except_days & s2.except_days
+		return filter(
+				lambda day: (day < a or day > b) or day in exc_intersect,
+				s1.except_days | s2.except_days )
+
 	def merge(self, span, exc_days_to_split=10):
 		'''Return GTFSTSMerge value,
 				with either new merged timespan or None if it's not possible.
@@ -178,17 +186,14 @@ class GTFSTimespan:
 			if ( s1.start <= s2.start and s1.end >= s2.end
 					and tuple(d1|d2 for d1,d2 in zip(s1.weekdays, s2.weekdays)) == s1.weekdays
 					and s1.except_days.issuperset(s2.except_days) ):
-				return GTFSTSMerge(GTFSTSMergeType.inc_diff_weekdays, s1)
+				return GTFSTSMerge( GTFSTSMergeType.inc_diff_weekdays,
+					GTFSTimespan(s1.start, s1.end, s1.weekdays, self.exc_days_overlap(s1, s2)) )
 		else:
 			if s1 == s2: return GTFSTSMerge(GTFSTSMergeType.same, s1)
 			if s1.end >= s2.start: # overlap
-				a, b = s2.start, min(s1.end, s2.end) # range of overlapping dates
-				exc_intersect = s1.except_days & s2.except_days
-				return GTFSTSMerge(GTFSTSMergeType.overlap, GTFSTimespan(
-					s1.start, max(s1.end, s2.end), weekdays, filter(
-						lambda day: (day < a or day > b) or day in exc_intersect,
-						s1.except_days | s2.except_days ) ))
-			if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split:
+				return GTFSTSMerge( GTFSTSMergeType.overlap, GTFSTimespan(
+					s1.start, max(s1.end, s2.end), weekdays, self.exc_days_overlap(s1, s2) ))
+			if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split: # bridge
 				return GTFSTSMerge(GTFSTSMergeType.bridge, GTFSTimespan(
 					s1.start, max(s1.end, s2.end), weekdays,
 					set( s1.except_days | s2.except_days |
@@ -487,8 +492,8 @@ class DTDtoGTFS:
 					self.stats['span-empty-sched'] += 1
 					continue
 
-				### Special processing for stp=C (CAN/cancel) entries
-				# Just subtract this "cancelled" timespan from all timespans for train_uid
+				### Special processing for stp=O/N/C entries
+				# Subtract timespans for these from all other entries
 
 				if s.stp_indicator in 'ONC':
 					for trip_id in train_trip_ids:
