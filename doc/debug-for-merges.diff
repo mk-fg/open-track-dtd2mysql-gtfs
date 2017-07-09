@@ -1,8 +1,8 @@
 diff --git a/mysql-dtd-to-gtfs.py b/mysql-dtd-to-gtfs.py
-index 745d28c..b5cc8ba 100755
+index f5484b7..67361ec 100755
 --- a/mysql-dtd-to-gtfs.py
 +++ b/mysql-dtd-to-gtfs.py
-@@ -548,13 +548,21 @@ class DTDtoGTFS:
+@@ -559,14 +559,22 @@ class DTDtoGTFS:
  
  				### Trip deduplication
  
@@ -18,13 +18,14 @@ index 745d28c..b5cc8ba 100755
  					trip_id = trip_merge_idx[trip_hash]
 +					print('  duplicate for:', trip_id)
  					trip_svc_timespans[trip_id].append(svc_span)
- 					continue
- 				trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx) + 1
-+				print('  added as:', trip_id)
  
- 				### Insert new gtfs.trip (and its stop_times)
+ 				else:
+ 					trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx) + 1
++					print('  added as:', trip_id)
  
-@@ -623,8 +631,16 @@ class DTDtoGTFS:
+ 					## Route is created in an ad-hoc fashion here currently, just as a placeholder
+ 					# These are also deduplicated by start/end stops via route_merge_idx.
+@@ -608,8 +616,16 @@ class DTDtoGTFS:
  		trip_svc_ids = dict() # {trip_id: svc_id_list}
  
  		self.log.debug('Merging service timespans for {} gtfs.trips...', len(trip_svc_timespans))
@@ -41,7 +42,7 @@ index 745d28c..b5cc8ba 100755
  
  			### Merge timespans where possible
  			if len(spans) > 1:
-@@ -636,12 +652,20 @@ class DTDtoGTFS:
+@@ -621,12 +637,20 @@ class DTDtoGTFS:
  						merge = s1.merge(s2)
  						if merge.t:
  							spans.difference_update([s1, s2])
