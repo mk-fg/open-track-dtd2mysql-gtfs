@@ -191,7 +191,7 @@ class GTFSTimespan:
 		else:
 			if s1 == s2: return GTFSTSMerge(GTFSTSMergeType.same, s1)
 			if s1.end >= s2.start: # overlap
-				return GTFSTSMerge( GTFSTSMergeType.overlap, GTFSTimespan(
+				return GTFSTSMerge(GTFSTSMergeType.overlap, GTFSTimespan(
 					s1.start, max(s1.end, s2.end), weekdays, self.exc_days_overlap(s1, s2) ))
 			if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split: # bridge
 				return GTFSTSMerge(GTFSTSMergeType.bridge, GTFSTimespan(
@@ -613,12 +613,12 @@ class DTDtoGTFS:
 			for n, span in enumerate(spans):
 				if span in svc_merge_idx: # reuse service_id for same exact span from diff trip
 					self.stats['svc-dedup'] += 1
-					spans[n] = svc_id
+					spans[n] = svc_merge_idx[span]
 					continue
 				svc_id = spans[n] = svc_merge_idx[span] = next(svc_id_seq)
 				self.insert( 'gtfs.calendar', service_id=svc_id,
 					start_date=span.start, end_date=span.end, **span.weekday_dict )
-				for day in span.except_days:
+				for day in sorted(span.except_days):
 					self.stats['svc-except-days'] += 1
 					self.insert( 'gtfs.calendar_dates', service_id=svc_id,
 						date=day, exception_type=int(GTFSExceptionType.removed) )
