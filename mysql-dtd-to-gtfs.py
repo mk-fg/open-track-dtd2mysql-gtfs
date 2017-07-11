@@ -552,15 +552,10 @@ class DTDtoGTFS:
 				ts_prev, ts_origin, ts_bug = None, None, set()
 				for st in stops:
 					public_stop = st.public_arrival_time or st.public_departure_time
-					if public_stop:
-						pickup_type = GTFSPickupType.regular
-						ts_arr, ts_dep = st.public_arrival_time, st.public_departure_time
-					else:
-						pickup_type = GTFSPickupType.none
-						ts_arr, ts_dep = st.scheduled_arrival_time, st.scheduled_departure_time
+					pickup_type = GTFSPickupType.regular
+					ts_arr, ts_dep = st.public_arrival_time, st.public_departure_time
 					# XXX: check if origin has some arrival time indication in CIF data
 					ts_arr, ts_dep = ts_arr or ts_dep, ts_dep or ts_arr # origin/termination stops
-					# XXX: not sure if stops without time should be skipped like that, maybe use averages?
 					if not (ts_arr and ts_dep): continue
 
 					# Midnight rollover and sanity check
