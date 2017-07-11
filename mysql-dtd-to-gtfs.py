@@ -203,40 +203,39 @@ class GTFSTimespan:
 			if s1.end >= s2.start: # overlap
 				return GTFSTSMerge(GTFSTSMergeType.overlap, GTFSTimespan(
 					s1.start, max(s1.end, s2.end), weekdays, self.exc_days_overlap(s1, s2) ))
-			if math.ceil((s2.start - s1.end).days * (sum(weekdays) / 7)) <= exc_days_to_split: # bridge
+			if len(list(self.date_range(s2.start, s1.end, weekdays))) <= exc_days_to_split: # bridge
 				return GTFSTSMerge(GTFSTSMergeType.bridge, GTFSTimespan(
 					s1.start, max(s1.end, s2.end), weekdays,
 					set( s1.except_days | s2.except_days |
 						set(self.date_range(s1.end + one_day, s2.start - one_day, weekdays)) ) ))
 		return GTFSTSMerge(GTFSTSMergeType.none, None)
 
-	def difference(self, span):
-		'''Return new timespan with passed span
-				excluded from it on None if there is not overlap.
+	def difference(self, span, exc_days_to_split=10):
+		'''Return new timespan(s) with specified one excluded from it on None if there is no overlap.
 			GTFSTimespanEmpty is raised if passed span completely overlaps this one.'''
-		try:
-			span_diff = GTFSTimespan( self.start, self.end,
-				self.weekdays, self.except_days | frozenset(span.date_iter()) )
-		except GTFSTimespanInvalid:
-			raise GTFSTimespanEmpty('Empty timespan result') from None
-		if span_diff == self: return
-		return span_diff
-
-	def subtract_days(self, day_from, day_to):
-		'''Return list of new timespans from this one without specified date interval.
-			GTFSTimespanEmpty is raised if there is nothing left after subtraction.'''
-		if self.start > day_to or self.end < day_from: return [self] # no overlap
-		start, end = self.start, self.end
-		if day_from > start and day_to < end: # splits timespan in two
-			return [
-				GTFSTimespan(start, day_from - one_day, self.weekdays, self.except_days),
-				GTFSTimespan(day_to + one_day, end, self.weekdays, self.except_days) ]
-		if day_from <= start and day_to >= end: # full overlap
-			raise GTFSTimespanEmpty('Empty timespan result')
-		# Adjust start or end of timespan
-		if day_from <= start: start = day_to + one_day
-		if day_to >= end: end = day_from - one_day
-		return [GTFSTimespan(start, end, self.weekdays, self.except_days)]
+		# Try to adjust start/end dates of timespan or split it in two, if
+		if ( not span.except_days # should potentially become "added" exceptions on cut-out part
+				and tuple(d1|d2 for d1,d2 in zip(self.weekdays, span.weekdays)) == span.weekdays
+				and len(list(self.date_range(span.start, span.end, self.weekdays))) >= exc_days_to_split ):
+			start, end = self.start, self.end
+			if span.start > start and span.end < end: # splits timespan in two
+				return [
+					GTFSTimespan(start, span.start - one_day, self.weekdays, self.except_days),
+					GTFSTimespan(span.end + one_day, end, self.weekdays, self.except_days) ]
+			if span.start <= start and span.end >= end: # full overlap
+				raise GTFSTimespanEmpty('Empty timespan result')
+			if span.start <= start: start = span.start + one_day
+			if span.end >= end: end = span.end - one_day
+			return [GTFSTimespan(start, end, self.weekdays, self.except_days)]
+		# Otherwise add all days of the overlay timespan as exceptions
+		else:
+			try:
+				span_diff = GTFSTimespan( self.start, self.end,
+					self.weekdays, self.except_days | frozenset(span.date_iter()) )
+			except GTFSTimespanInvalid:
+				raise GTFSTimespanEmpty('Empty timespan result') from None
+			if span_diff == self: return
+			return [span_diff]
 
 
 class DTDtoGTFS:
@@ -511,18 +510,13 @@ class DTDtoGTFS:
 					for trip_id in train_trip_ids:
 						spans_new = list()
 						for span in trip_svc_timespans[trip_id]:
-							try:
-								# Overlays cancel part of other spans regardless of weekdays/exceptions
-								# Unlike stp=C entries, which apply according to their weekdays/exceptions
-								span_replace = ( [span.difference(svc_span) or span]
-									if s.stp_indicator == 'C' else span.subtract_days(s.runs_from, s.runs_to) )
-							except GTFSTimespanEmpty: # span was completely cancelled
+							try: spans_new.extend(span.difference(svc_span) or [span])
+							except GTFSTimespanEmpty: # span was completely covered
 								self.stats['span-replace-total'] += 1
 								continue
-							spans_new.extend(span_replace)
 						if spans_new != trip_svc_timespans[trip_id]:
 							trip_svc_timespans[trip_id] = spans_new
-					if s.stp_indicator == 'C': continue
+					if s.stp_indicator == 'C': continue # have no associated trip, unlike stp=O/N
 
 				### Processing for trip stops
 				if s.location is None or s.tiploc_code is None:
