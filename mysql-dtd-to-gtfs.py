@@ -560,10 +560,11 @@ class DTDtoGTFS:
 
 					# Midnight rollover and sanity check
 					if not ts_origin: ts_origin = ts_dep
-					elif ts_prev > ts_dep:
+					elif ts_prev > ts_arr:
 						if not ( ts_origin.total_seconds() >= 4*3600
-							and ts_origin > ts_dep ): ts_bug.add(st.location)
-						ts_arr, ts_dep = ts_arr + one_day, ts_dep + one_day
+							and ts_origin > ts_arr ): ts_bug.add(st.location)
+						ts_arr += one_day
+					if ts_dep < ts_arr: ts_dep += one_day
 					ts_prev = ts_dep
 
 					trip_stops.append((st, pickup_type, ts_arr, ts_dep))
