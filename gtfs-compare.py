@@ -374,6 +374,7 @@ class GTFSDB:
 				diff_found |= True
 				added, removed = diffs = \
 					diff.get('set_item_added', list()), diff.get('set_item_removed', list())
+				diff_seqs = set()
 				log.info('Stop sequence(s) mismatch for train_uid: {}', train_uid)
 				if len(added) == len(removed) == 1:
 					print(f'--- [{train_uid}] Different stop sequence (t1={db1}, t2={db2}):')
@@ -384,10 +385,20 @@ class GTFSDB:
 					for (k, t), seq_list in zip([(f'in {db2}', 't2'), (f'in {db1}', 't1')], diffs):
 						if not seq_list: continue
 						print(f'--- [{train_uid}] Only {k} ({len(seq_list)}):')
-						for seq in seq_list: print(diff_print_fill(stop_seq_str(getattr(seq, t))))
+						for seq in seq_list:
+							seq = getattr(seq, t)
+							diff_seqs.add(seq)
+							print(diff_print_fill(stop_seq_str(seq)))
 				else:
 					print('--- [{train_uid}] Multiple/mismatched changes:')
 					diff_print(diff)
+				print('all schedules in both dbs (for reference):')
+				for db in dbs:
+					print(f' - {db}:')
+					for seq in sorted(set(trip_info[db].stops.values())):
+						print(diff_print_fill(
+							stop_seq_str(seq),
+							' {} - '.format('x' if seq in diff_seqs else ' '), '     ' ))
 				if cif_db:
 					print('cif schedules/stops (for reference):')
 					for s in self.q(f'''
