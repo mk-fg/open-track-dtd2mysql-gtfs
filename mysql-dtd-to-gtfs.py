@@ -493,11 +493,13 @@ class DTDtoGTFS:
 					continue
 
 				### Service timespan for this schedule
+				# Bank holidays only apply for stp=P schedules that have bank_holiday_running=0
 
 				try:
 					svc_span = GTFSTimespan( s.runs_from, s.runs_to,
 						weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order),
-						except_days=not s.bank_holiday_running and self.bank_holidays )
+						except_days=self.bank_holidays
+							if s.stp_indicator == 'P' and not s.bank_holiday_running else None )
 				except GTFSTimespanInvalid:
 					self.stats['span-empty-sched'] += 1
 					continue
