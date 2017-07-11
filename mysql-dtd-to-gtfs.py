@@ -127,8 +127,9 @@ GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 GTFSTSMerge = collections.namedtuple('TSMerge', 't span')
 GTFSTSMergeType = enum.IntEnum( 'TSMergeType',
 	'none same inc inc_diff_weekdays overlap bridge', start=0 )
+GTFSTSDiff = collections.namedtuple('TSMerge', 't spans')
+GTFSTSDiffType = enum.IntEnum('TSDiffType', 'none full split move exc', start=0)
 
-class GTFSTimespanInvalid(Exception): pass
 class GTFSTimespanEmpty(Exception): pass
 
 @ft.total_ordering
@@ -141,7 +142,7 @@ class GTFSTimespan:
 		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
 		self.weekdays = tuple(map(int, weekdays))
 		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
-		except StopIteration: raise GTFSTimespanInvalid(str(self))
+		except StopIteration: raise GTFSTimespanEmpty(str(self)) from None
 		self.except_days = frozenset(filter(
 			lambda day: start <= day <= end and self.weekdays[day.weekday()], self.except_days ))
 		# self.end is negated in hash_tuple so that largest interval with same start is sorted first
@@ -177,65 +178,84 @@ class GTFSTimespan:
 		for day in filter(svc_day_check, iter_range(a, b, one_day)): yield day
 
 	@staticmethod
-	def exc_days_overlap(s1, s2):
-		a, b = s2.start, min(s1.end, s2.end)
+	def date_overlap(s1, s2):
+		'Sort timespans by start/end and return overlapping range, if any.'
+		if s1 > s2: s1, s2 = s2, s1 # s1 starts first and ends last if start is same
+		a, b = ((s2.start, min(s1.end, s2.end)) if s1.end >= s2.start else (None, None))
+		return s1, s2, a, b
+
+	@classmethod
+	def exc_days_overlap(cls, s1, s2, a=None, b=None):
+		if not (a and b): s1, s2, a, b = self.date_overlap(s1, s2)
 		exc_intersect = s1.except_days & s2.except_days
 		return filter(
-				lambda day: (day < a or day > b) or day in exc_intersect,
-				s1.except_days | s2.except_days )
+			lambda day: (day < a or day > b) or day in exc_intersect,
+			s1.except_days | s2.except_days )
 
 	def merge(self, span, exc_days_to_split=10):
 		'''Return GTFSTSMerge value,
 				with either new merged timespan or None if it's not possible.
 			exc_days_to_split = number of days in sequence
 				to tolerate as exceptions when merging two spans with small gap in-between.'''
-		s1, s2, weekdays = self, span, self.weekdays
-		if s1 > s2: s1, s2 = s2, s1 # s1 starts first and ends last if start is same
+		(s1, s2, a, b), weekdays = self.date_overlap(self, span), self.weekdays
 		if s1.weekdays != s2.weekdays:
 			# Check if s1 includes s2 range and all its weekdays
-			if ( s1.start <= s2.start and s1.end >= s2.end
+			if ( b == s2.end
 					and tuple(d1|d2 for d1,d2 in zip(s1.weekdays, s2.weekdays)) == s1.weekdays
 					and s1.except_days.issuperset(s2.except_days) ):
 				return GTFSTSMerge( GTFSTSMergeType.inc_diff_weekdays,
-					GTFSTimespan(s1.start, s1.end, s1.weekdays, self.exc_days_overlap(s1, s2)) )
+					GTFSTimespan(s1.start, s1.end, s1.weekdays, self.exc_days_overlap(s1, s2, a, b)) )
 		else:
 			if s1 == s2: return GTFSTSMerge(GTFSTSMergeType.same, s1)
-			if s1.end >= s2.start: # overlap
+			if a and b: # overlap
 				return GTFSTSMerge(GTFSTSMergeType.overlap, GTFSTimespan(
-					s1.start, max(s1.end, s2.end), weekdays, self.exc_days_overlap(s1, s2) ))
-			if len(list(self.date_range(s2.start, s1.end, weekdays))) <= exc_days_to_split: # bridge
+					s1.start, max(s1.end, s2.end), weekdays, self.exc_days_overlap(s1, s2, a, b) ))
+			if len(list(self.date_range(s1.end, s2.start, weekdays))) <= exc_days_to_split: # bridge
 				return GTFSTSMerge(GTFSTSMergeType.bridge, GTFSTimespan(
 					s1.start, max(s1.end, s2.end), weekdays,
 					set( s1.except_days | s2.except_days |
 						set(self.date_range(s1.end + one_day, s2.start - one_day, weekdays)) ) ))
 		return GTFSTSMerge(GTFSTSMergeType.none, None)
 
-	def difference(self, span, exc_days_to_split=10):
-		'''Return new timespan(s) with specified one excluded from it on None if there is no overlap.
-			GTFSTimespanEmpty is raised if passed span completely overlaps this one.'''
-		# Try to adjust start/end dates of timespan or split it in two, if
-		if ( not span.except_days # should potentially become "added" exceptions on cut-out part
-				and tuple(d1|d2 for d1,d2 in zip(self.weekdays, span.weekdays)) == span.weekdays
-				and len(list(self.date_range(span.start, span.end, self.weekdays))) >= exc_days_to_split ):
-			start, end = self.start, self.end
-			if span.start > start and span.end < end: # splits timespan in two
-				return [
+	def _difference_range(self, span, exc_days_to_split=10):
+		'''Try to subtract overlap range from timespan,
+				either by moving start/end or splitting it in two.
+			Returns either GTFSTSDiff or None if it cannot be done this way.'''
+		if tuple(d1|d2 for d1,d2 in zip(self.weekdays, span.weekdays)) != span.weekdays: return
+		s1, s2, a, b = self.date_overlap(self, span)
+		if not (a and b): return GTFSTSDiff(GTFSTSDiffType.none, [self])
+		svc_days = set(self.date_range(a, b, self.weekdays, self.except_days))
+		if span.except_days.issuperset(svc_days): # all service days are exceptions in overlay
+			return GTFSTSDiff(GTFSTSDiffType.none, [self])
+		if svc_days.intersection(span.except_days): return # XXX: need "added" exceptions here
+		start, end = self.start, self.end
+		if a == start and b == end: return GTFSTSDiff(GTFSTSDiffType.full, [])
+		if a != start and b != end: # split in two, unless only few exc_days required to bridge
+			if len(svc_days.difference(span.except_days)) >= exc_days_to_split:
+				return GTFSTSDiff(GTFSTSDiffType.split, [
 					GTFSTimespan(start, span.start - one_day, self.weekdays, self.except_days),
-					GTFSTimespan(span.end + one_day, end, self.weekdays, self.except_days) ]
-			if span.start <= start and span.end >= end: # full overlap
-				raise GTFSTimespanEmpty('Empty timespan result')
-			if span.start <= start: start = span.start + one_day
-			if span.end >= end: end = span.end - one_day
-			return [GTFSTimespan(start, end, self.weekdays, self.except_days)]
+					GTFSTimespan(span.end + one_day, end, self.weekdays, self.except_days) ])
+			return
+		# Remaining case is (a == start or b == end) - move start/end accordingly
+		if a == start: start = b + one_day
+		else: end = a - one_day
+		return GTFSTSDiff( GTFSTSDiffType.move,
+			[GTFSTimespan(start, end, self.weekdays, self.except_days)] )
+
+	def difference(self, span):
+		'''Return new timespan(s) with specified one excluded from it on None if there is no overlap.
+			exc_days_to_split = number of days in sequence
+				to tolerate as exceptions before splitting this span into two.'''
+		# Try to adjust start/end dates of timespan or split it in two
+		diff = self._difference_range(span)
+		if diff: return diff
 		# Otherwise add all days of the overlay timespan as exceptions
-		else:
-			try:
-				span_diff = GTFSTimespan( self.start, self.end,
-					self.weekdays, self.except_days | frozenset(span.date_iter()) )
-			except GTFSTimespanInvalid:
-				raise GTFSTimespanEmpty('Empty timespan result') from None
-			if span_diff == self: return
-			return [span_diff]
+		try:
+			span_diff = GTFSTimespan( self.start, self.end,
+				self.weekdays, self.except_days | frozenset(span.date_iter()) )
+		except GTFSTimespanEmpty: return GTFSTSDiff(GTFSTSDiffType.full, [])
+		if span_diff == self: return GTFSTSDiff(GTFSTSDiffType.none, [self])
+		return GTFSTSDiff(GTFSTSDiffType.exc, [span_diff])
 
 
 class DTDtoGTFS:
@@ -499,8 +519,8 @@ class DTDtoGTFS:
 						weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order),
 						except_days=self.bank_holidays
 							if s.stp_indicator == 'P' and not s.bank_holiday_running else None )
-				except GTFSTimespanInvalid:
-					self.stats['span-empty-sched'] += 1
+				except GTFSTimespanEmpty:
+					self.stats['svc-empty-sched'] += 1
 					continue
 
 				### Special processing for stp=O/N/C entries
@@ -508,14 +528,16 @@ class DTDtoGTFS:
 
 				if s.stp_indicator in 'ONC':
 					for trip_id in train_trip_ids:
-						spans_new = list()
-						for span in trip_svc_timespans[trip_id]:
-							try: spans_new.extend(span.difference(svc_span) or [span])
-							except GTFSTimespanEmpty: # span was completely covered
-								self.stats['span-replace-total'] += 1
-								continue
-						if spans_new != trip_svc_timespans[trip_id]:
-							trip_svc_timespans[trip_id] = spans_new
+						diff_any, spans = False, trip_svc_timespans[trip_id].copy()
+						for n, span in enumerate(spans):
+							diff = span.difference(svc_span)
+							if not diff.t: spans[n] = [span]
+							else:
+								diff_any = True
+								self.stats[f'svc-diff-op'] += 1
+								self.stats[f'svc-diff-{diff.t.name}'] += 1
+								spans[n] = diff.spans
+						if diff_any: trip_svc_timespans[trip_id] = list(it.chain.from_iterable(spans))
 					if s.stp_indicator == 'C': continue # have no associated trip, unlike stp=O/N
 
 				### Processing for trip stops

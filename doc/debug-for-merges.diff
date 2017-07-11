@@ -1,8 +1,28 @@
 diff --git a/mysql-dtd-to-gtfs.py b/mysql-dtd-to-gtfs.py
-index f5484b7..67361ec 100755
+index dadf238..f5c5ac8 100755
 --- a/mysql-dtd-to-gtfs.py
 +++ b/mysql-dtd-to-gtfs.py
-@@ -559,14 +559,22 @@ class DTDtoGTFS:
+@@ -529,7 +529,10 @@ class DTDtoGTFS:
+ 				if s.stp_indicator in 'ONC':
+ 					for trip_id in train_trip_ids:
+ 						diff_any, spans = False, trip_svc_timespans[trip_id].copy()
++						print(f'------ diff from timespans ({len(spans)}) for trip {trip_id}')
++						print('  cutting-out:', svc_span)
+ 						for n, span in enumerate(spans):
++							print('  from:', span)
+ 							diff = span.difference(svc_span)
+ 							if not diff.t: spans[n] = [span]
+ 							else:
+@@ -537,6 +540,8 @@ class DTDtoGTFS:
+ 								self.stats[f'svc-diff-op'] += 1
+ 								self.stats[f'svc-diff-{diff.t.name}'] += 1
+ 								spans[n] = diff.spans
++								print(f'    cut-type: {diff.t.name}')
++								for span in diff.spans: print('   ', span)
+ 						if diff_any: trip_svc_timespans[trip_id] = list(it.chain.from_iterable(spans))
+ 					if s.stp_indicator == 'C': continue # have no associated trip, unlike stp=O/N
+ 
+@@ -583,14 +588,22 @@ class DTDtoGTFS:
  
  				### Trip deduplication
  
@@ -25,7 +45,7 @@ index f5484b7..67361ec 100755
  
  					## Route is created in an ad-hoc fashion here currently, just as a placeholder
  					# These are also deduplicated by start/end stops via route_merge_idx.
-@@ -608,8 +616,16 @@ class DTDtoGTFS:
+@@ -632,8 +645,16 @@ class DTDtoGTFS:
  		trip_svc_ids = dict() # {trip_id: svc_id_list}
  
  		self.log.debug('Merging service timespans for {} gtfs.trips...', len(trip_svc_timespans))
@@ -42,7 +62,7 @@ index f5484b7..67361ec 100755
  
  			### Merge timespans where possible
  			if len(spans) > 1:
-@@ -621,12 +637,20 @@ class DTDtoGTFS:
+@@ -645,12 +666,20 @@ class DTDtoGTFS:
  						merge = s1.merge(s2)
  						if merge.t:
  							spans.difference_update([s1, s2])
