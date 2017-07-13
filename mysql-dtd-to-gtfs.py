@@ -144,7 +144,8 @@ class GTFSTimespan:
 		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
 		except StopIteration: raise GTFSTimespanEmpty(str(self)) from None
 		self.except_days = frozenset(filter(
-			lambda day: start <= day <= end and self.weekdays[day.weekday()], self.except_days ))
+			( lambda day: self.start <= day <= self.end
+				and self.weekdays[day.weekday()] ), self.except_days ))
 		# self.end is negated in hash_tuple so that largest interval with same start is sorted first
 		self._hash_tuple = (
 			self._date_int(self.start), -self._date_int(self.end), self.weekdays, self.except_days )
@@ -158,7 +159,7 @@ class GTFSTimespan:
 
 	def __repr__(self):
 		weekdays = ''.join((str(n) if d else '.') for n,d in enumerate(self.weekdays, 1))
-		except_days = ', '.join(map(str, self.except_days))
+		except_days = ', '.join(sorted(map(str, self.except_days)))
 		return f'<TS {weekdays} [{self.start} {self.end}] {{{except_days}}}>'
 
 	@property
