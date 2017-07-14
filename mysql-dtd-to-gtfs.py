@@ -554,13 +554,13 @@ class DTDtoGTFS:
 					[ st.scheduled_arrival_time, st.scheduled_departure_time,
 						st.scheduled_pass_time, st.public_arrival_time, st.public_departure_time ]
 					for st in stops )))
+				stop_time_key = lambda st: st.public_arrival_time or st.public_departure_time
+				stops = sorted(filter(stop_time_key, stops), key=stop_time_key)
+				pickup_type = GTFSPickupType.regular
 				for st in stops:
-					public_stop = st.public_arrival_time or st.public_departure_time
-					pickup_type = GTFSPickupType.regular
 					ts_arr, ts_dep = st.public_arrival_time, st.public_departure_time
 					# XXX: check if origin has some arrival time indication in CIF data
 					ts_arr, ts_dep = ts_arr or ts_dep, ts_dep or ts_arr # origin/termination stops
-					if not (ts_arr and ts_dep): continue
 
 					# Midnight rollover and sanity check
 					if (ts_prev or ts_origin) > ts_arr: ts_arr += one_day
