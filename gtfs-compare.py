@@ -299,7 +299,7 @@ class GTFSDB:
 
 		self.commit()
 
-	def compare( self, db1, db2, cif_db=None, train_uid_limit=None, skip_holidays=None,
+	def compare( self, db1, db2, cif_db=None, skip_diffs=None, train_uid_limit=None,
 			train_uid_seek=None, train_uid_next=False, stop_after_train_uid_mismatch=False ):
 		log, dbs = self.log, (db1, db2)
 
@@ -307,6 +307,9 @@ class GTFSDB:
 		diff_print = lambda diff: pprint.pprint(diff, indent=2) or True
 		diff_print_fill = lambda text, tab1=' - ', tabn='   ': textwrap.fill(
 			text, 100, initial_indent=tab1, subsequent_indent=tabn )
+
+		skip_holidays = (skip_diffs and skip_diffs.get('holidays')) or set()
+		skip_rollovers = skip_diffs and skip_diffs.get('rollover')
 
 		tuid_sets = tuple(
 			set(map( op.itemgetter(0),
@@ -369,7 +372,15 @@ class GTFSDB:
 
 
 			log.debug('Comparing trip stops for train_uid={}...', train_uid)
-			diff = diff_func(*(set(trip_info[db].stops.values()) for db in dbs))
+			stop_sets = tuple(set(trip_info[db].stops.values()) for db in dbs)
+			diff = diff_func(*stop_sets)
+			if diff and skip_rollovers:
+				stop_sets = tuple(tuple(
+					( tuple((crs, ts_arr[2:], ts_dep[2:]) for crs,ts_arr,ts_dep in stops)
+						if stops[0][1].startswith('1+00:') else stops )
+					for stops in db_stops ) for db_stops in stop_sets)
+				diff_fixed = diff_func(*stop_sets)
+				if not diff_fixed: diff = diff_fixed
 			if diff:
 				diff_found |= True
 				added, removed = diffs = \
@@ -517,6 +528,7 @@ def main(args=None):
 
 	cmds = parser.add_subparsers(title='Commands', dest='call')
 
+
 	cmd = cmds.add_parser('import', help='Import gtfs feed from txt files into mysql db.')
 	cmd.add_argument('src_path', help='Path with gtfs txt files to import.')
 	cmd.add_argument('db_name', help='Destination mysql database to use.')
@@ -526,19 +538,28 @@ def main(args=None):
 			' If such database already exists, it will be dropped first!'
 			' Default schema file path (if not specified as optional argument): %(default)s.')
 
+
 	cmd = cmds.add_parser('compare', help='Compare data between two mysql dbs.')
-	cmd.add_argument('db1', help='Database-1 to compare Database-2 against.')
-	cmd.add_argument('db2', help='Database-2 to compare Database-1 against.')
-	cmd.add_argument('-c', '--cif-db', metavar='db-name',
+
+	group = cmd.add_argument_group('Database options')
+	group.add_argument('db1', help='Database-1 to compare Database-2 against.')
+	group.add_argument('db2', help='Database-2 to compare Database-1 against.')
+	group.add_argument('-c', '--cif-db', metavar='db-name',
 		help='Name of CIF database to pull/display reference data from on mismatches.')
-	cmd.add_argument('-s', '--train-uid-seek', metavar='train_uid',
+
+	group = cmd.add_argument_group('Subset selection')
+	group.add_argument('-s', '--train-uid-seek', metavar='train_uid',
 		help='Skip to diff of specified train_uid (ignoring all diffs before it).')
-	cmd.add_argument('-x', '--train-uid-seek-next', action='store_true',
+	group.add_argument('-x', '--train-uid-seek-next', action='store_true',
 		help='When using -s/--train-uid-seek, skip to diff for train_uid right after specified one.')
-	cmd.add_argument('-n', '--train-uid-limit', metavar='n', type=int,
+	group.add_argument('-n', '--train-uid-limit', metavar='n', type=int,
 		help='Stop after comparing data for specified number of train_uids.')
-	cmd.add_argument('-1', '--stop-after-train-uid-mismatch',
+	group.add_argument('-1', '--stop-after-train-uid-mismatch',
 		action='store_true', help='Stop after encountering first mismatch for train_uid data.')
+
+	group = cmd.add_argument_group('Diff class skipping')
+	cmd.add_argument('--skip-midnight-rollover-diffs', action='store_true',
+		help='Skip diffs where stop times start at 00:xx and have +1 day in one case.')
 	cmd.add_argument('--skip-bank-holiday-diffs', metavar='holiday-file',
 		help='Skip diffs that only have bank-holiday dates from specified list file.')
 	cmd.add_argument('--skip-bank-holiday-fmt',
@@ -560,16 +581,16 @@ def main(args=None):
 			db.parse(opts.db_name, opts.src_path, opts.gtfs_schema)
 
 		elif opts.call == 'compare':
-			skip_holidays = set()
+			skip = dict(holidays=set(), rollover=False)
 			if opts.skip_bank_holiday_diffs:
 				with pathlib.Path(opts.skip_bank_holiday_diffs).open() as src:
-					for line in src.read().splitlines(): skip_holidays.add(
+					for line in src.read().splitlines(): skip['holidays'].add(
 						datetime.datetime.strptime(line, opts.skip_bank_holiday_fmt).date() )
+			if opts.skip_midnight_rollover_diffs: skip['rollover'] = True
 			db.compare(
-				opts.db1, opts.db2, cif_db=opts.cif_db,
-				train_uid_limit=opts.train_uid_limit, skip_holidays=skip_holidays,
+				opts.db1, opts.db2, cif_db=opts.cif_db, train_uid_limit=opts.train_uid_limit,
 				train_uid_seek=opts.train_uid_seek, train_uid_next=opts.train_uid_seek_next,
-				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch )
+				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch, skip_diffs=skip )
 
 		else: parser.error(f'Action not implemented: {opts.call}')
 
