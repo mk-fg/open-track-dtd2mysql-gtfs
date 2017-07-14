@@ -377,8 +377,8 @@ class GTFSDB:
 			if diff and skip_rollovers:
 				stop_sets = tuple(tuple(
 					( tuple((crs, ts_arr[2:], ts_dep[2:]) for crs,ts_arr,ts_dep in stops)
-						if stops[0][1].startswith('1+00:') else stops )
-					for stops in db_stops ) for db_stops in stop_sets)
+						if stops[0][1].startswith('1+:') else stops )
+					for stops in db_stops if stops ) for db_stops in stop_sets)
 				diff_fixed = diff_func(*stop_sets)
 				if not diff_fixed: diff = diff_fixed
 			if diff:
@@ -568,6 +568,8 @@ def main(args=None):
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
+	# Force line buffering for stdout, instead of default chunks when it's not tty
+	sys.stdout = open(sys.stdout.fileno(), 'w', 1)
 	logging.basicConfig( handlers=[LogStdoutHandler()],
 		level=logging.DEBUG if opts.debug else logging.INFO,
 		format='%(asctime)s :: %(name)s %(levelname)s :: %(message)s' )

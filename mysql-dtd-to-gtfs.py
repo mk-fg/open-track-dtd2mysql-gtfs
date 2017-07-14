@@ -550,7 +550,10 @@ class DTDtoGTFS:
 				trip_hash, trip_stops = [s.train_uid], list()
 
 				# XXX: time conversions - DTD->GTFS
-				ts_prev, ts_origin, ts_bug = None, None, set()
+				ts_prev, ts_origin = None, min(filter(None, it.chain.from_iterable(
+					[ st.scheduled_arrival_time, st.scheduled_departure_time,
+						st.scheduled_pass_time, st.public_arrival_time, st.public_departure_time ]
+					for st in stops )))
 				for st in stops:
 					public_stop = st.public_arrival_time or st.public_departure_time
 					pickup_type = GTFSPickupType.regular
@@ -560,25 +563,18 @@ class DTDtoGTFS:
 					if not (ts_arr and ts_dep): continue
 
 					# Midnight rollover and sanity check
-					if not ts_origin: ts_origin = ts_dep
-					elif ts_prev > ts_arr:
-						if not ( ts_origin.total_seconds() >= 4*3600
-							and ts_origin > ts_arr ): ts_bug.add(st.location)
-						ts_arr += one_day
+					if (ts_prev or ts_origin) > ts_arr: ts_arr += one_day
 					if ts_dep < ts_arr: ts_dep += one_day
 					ts_prev = ts_dep
 
 					trip_stops.append((st, pickup_type, ts_arr, ts_dep))
 					trip_hash.append((st.crs_code, ts_arr.total_seconds(), ts_dep.total_seconds()))
 
-				if ts_bug:
-					log_lines(self.log.warning,
-						[ 'Potential ordering bug in stop sequence:',
-							*( ( f'  {n:>02d} {st.crs_code} {dts_format(ts_arr)} {dts_format(ts_dep)}{{}}',
-									' <-- bug here' if st.location in ts_bug else '' )
-								for n, (st, _, ts_arr, ts_dep) in enumerate(trip_stops) ) ])
-
 				### Trip deduplication
+
+				if len(trip_stops) < 2:
+					self.stats['trip-no-stops'] += 1
+					continue
 
 				trip_hash = hash(tuple(trip_hash))
 				if trip_hash in trip_merge_idx:
