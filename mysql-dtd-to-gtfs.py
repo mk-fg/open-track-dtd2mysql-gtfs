@@ -401,12 +401,11 @@ class DTDtoGTFS:
 				( stop_id, stop_code, stop_name, stop_desc,
 					stop_timezone, wheelchair_boarding )
 				SELECT
-					crs_code, tiploc_code, description, description,
-						"Europe/London" as tz, 0 as acc_wheelchair
-				FROM {self.db_cif}.tiploc
-				WHERE
-					crs_code IS NOT NULL
-					AND description IS NOT NULL''')
+					crs_code, tiploc_code,
+					station_name, station_name, "Europe/London", 0
+				FROM {self.db_cif}.physical_station
+				GROUP BY crs_code
+				ORDER BY crs_code''')
 
 
 	def populate_transfers(self):
@@ -477,8 +476,11 @@ class DTDtoGTFS:
 			{train_uid_slice}
 			LEFT JOIN {self.db_cif}.schedule_extra e ON e.schedule = s.id
 			LEFT JOIN {self.db_cif}.stop_time st ON st.schedule = s.id
-			LEFT JOIN {self.db_cif}.tiploc t ON t.tiploc_code = st.location
-			WHERE st.id IS NULL OR t.crs_code IS NOT NULL
+			LEFT JOIN {self.db_cif}.physical_station ps ON st.location = ps.tiploc_code
+			WHERE
+				st.id IS NULL
+				OR ( ps.crs_code IS NOT NULL
+					AND (st.scheduled_arrival_time IS NOT NULL OR st.scheduled_departure_time IS NOT NULL) )
 			ORDER BY s.train_uid, FIELD(s.stp_indicator,'P','N','O','C'), s.id, st.id'''
 		(sched_count,), = self.q(f'SELECT COUNT(*) FROM {self.db_cif}.schedule s {train_uid_slice}')
 		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
@@ -596,7 +598,7 @@ class DTDtoGTFS:
 							route_id=route_id, route_type=int(GTFSRouteType.rail),
 							route_short_name=f'{stops[0].crs_code}-{stops[-1].crs_code}',
 							route_long_name='From {} to {}'.format(*(
-								((stops[n].description or '').title() or stops[n].crs_code) for n in [0, -1] )) )
+								((stops[n].station_name or '').title() or stops[n].crs_code) for n in [0, -1] )) )
 
 					# XXX: check if more trip/stop metadata can be filled-in here
 					self.insert( 'gtfs.trips',
