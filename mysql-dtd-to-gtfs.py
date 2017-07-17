@@ -259,6 +259,26 @@ class Timespan:
 		return TimespanDiff(TimespanDiffType.exc, [span_diff])
 
 
+ScheduleStop = collections.namedtuple('SS', 'id ts_arr ts_dep')
+
+class Schedule:
+
+	def __init__(self, s, stops, span):
+		self.sched_id, self.trip_headsign, self.trip_name = s.id, s.train_uid, s.retail_train_id
+		self.stops, self.spans = tuple(stops), [span]
+		self._hash_tuple = s.train_uid, self.stops
+
+	def __eq__(self, s): return self._hash_tuple == s._hash_tuple
+	def __hash__(self): return hash(self._hash_tuple)
+
+	def subtract_timespan(self, svc_span):
+		diffs = list(s.difference(svc_span) for s in self.spans)
+		diff_types = list(map(op.attrgetter('t'), diffs))
+		if any(diff_types):
+			self.spans = list(it.chain.from_iterable(map(op.attrgetter('spans'), diffs)))
+		return diff_types
+
+
 class DTDtoGTFS:
 
 	# Forces errors on truncated values and issues in multi-row inserts
@@ -377,7 +397,9 @@ class DTDtoGTFS:
 
 		## Step-1: Populate gtfs.trips and gtfs.stop_times for cif.schedules,
 		##  building mapping of service timespans for each trip_id.
-		trip_svc_timespans = self.process_schedules(test_run_slice)
+		schedule_iter = self.get_schedules(test_run_slice)
+		# schedule_iter = self.assoc_filter(schedule_iter)
+		trip_svc_timespans = self.schedules_to_trips(schedule_iter)
 
 		## Step-2: Merge/optimize timespans in trip_svc_timespans
 		##  and create gtfs.calendar entries, converting these timespans to service_id values.
@@ -436,10 +458,10 @@ class DTDtoGTFS:
 				FROM {self.db_cif}.fixed_link''')
 
 
-	def get_schedules(self, test_run_slice, z_part=0.3):
-		# Schedules are fetched along with stops that get grouped by python code later
-		# Two tables are queried in order: regular "schedule" and "z_schedule"
-
+	def _get_schedules(self, test_run_slice, z_part=0.3):
+		'''Iterator for raw cif.schedule rows from db.
+			Schedules are fetched along with stops/stop_times.
+			Two tables are queried in order: cif.schedule and cif.z_schedule.'''
 		test_run_slice_parts = 0, 0 # only used with test_run_slice
 		if isinstance(test_run_slice, int):
 			train_uid_slice = f'''
@@ -500,39 +522,29 @@ class DTDtoGTFS:
 			self.log.debug(
 				'Fetching cif.{}schedule entries (count={}, test-train-limit={}/{})...',
 				qt['z'], sched_count, qt['z_slice'] or 'NA', test_run_slice )
-			for s in self.q(q_sched.format(**qt)): yield s
+			yield from self.q(q_sched.format(**qt))
 
-	def process_schedules(self, test_run_slice):
-		'''Process cif.schedule entries, populating gtfs.trips and gtfs.stop_times.
-			Returns "trip_svc_timespans" index of {trip_id: timespans},
-				to populate gtfs.calendar and gtfs.calendar_dates tables after some merging.
-			As gtfs.calendar is still empty, all created trips don't have valid service_id value set.'''
-		# XXX: processing of associations
-		# XXX: routes are also added here in an ad-hoc manner - need to handle these differently later
+	def get_schedules(self, test_run_slice):
+		'''Iterate over cif.schedule entries and their stop_times in db,
+			applying all overlays/cancellations (on a per-train basis)
+			and yielding non-overlapping Schedule entries, corresponding to gtfs trips.'''
+		schedule_rows = self._get_schedules(test_run_slice)
+		sched_count = next(schedule_rows)
 
-		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
-		schedules = self.get_schedules(test_run_slice)
-		sched_count = next(schedules)
-
-		# Only one gtfs.trip_id is created for
-		#  same trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
-		route_merge_idx = dict() # {(src, dst}: id}
-		trip_merge_idx = dict() # {trip_hash: gtfs.trip_id}
-
-		# Fetched rows are grouped by:
-		#  - train_uid to apply overrides (stp=O/N/C) in the specified order easily.
-		#  - schedule_id to get clean "process one trip at a time" loop.
+		# Raw sql rows are grouped by:
+		#  - train_uid (schedules) to apply overrides (stp=O/N/C) in the specified order.
+		#  - schedule_id (stops) to get clean "process one schedule at a time" loop.
 		self.log.debug('Processing {} cif.schedule entries...', sched_count)
 		progress = progress_iter(self.log, 'schedules', sched_count)
-		for train_uid, train_schedule_stops in it.groupby(schedules, op.attrgetter('train_uid')):
 
-			train_trip_ids = set()
+		for train_uid, train_schedule_stops in it.groupby(schedule_rows, op.attrgetter('train_uid')):
+			train_schedules = set()
 
 			for schedule_id, stops in it.groupby(train_schedule_stops, op.attrgetter('id')):
 				s = next(stops)
 				stops = [s, *stops]
 
-				progress.send(['trips={:,}', len(trip_svc_timespans)])
+				next(progress)
 				self.stats['sched-count'] += 1
 				self.stats[f'sched-entry-{s.stp_indicator}'] += 1
 				self.stats_by_train[s.train_uid][f'stp-{s.stp_indicator}'] += 1
@@ -558,26 +570,21 @@ class DTDtoGTFS:
 				# Subtract timespans for these from all other entries
 
 				if s.stp_indicator in 'ONC':
-					for trip_id in train_trip_ids:
-						diff_any, spans = False, trip_svc_timespans[trip_id].copy()
-						for n, span in enumerate(spans):
-							diff = span.difference(svc_span)
-							if not diff.t: spans[n] = [span]
-							else:
-								diff_any = True
-								self.stats[f'svc-diff-op'] += 1
-								self.stats[f'svc-diff-{diff.t.name}'] += 1
-								spans[n] = diff.spans
-						if diff_any: trip_svc_timespans[trip_id] = list(it.chain.from_iterable(spans))
+					for schedule in train_schedules:
+						diff_types = schedule.subtract_timespan(svc_span)
+						for dt in filter(None, diff_types):
+							self.stats[f'svc-diff-op'] += 1
+							self.stats[f'svc-diff-{dt.name}'] += 1
 					if s.stp_indicator == 'C': continue # have no associated trip, unlike stp=O/N
 
-				### Processing for trip stops
+				### Processing for schedule stops
+
 				if s.location is None:
 					# self.log.info('Skipping schedule with no usable stops: {}', s)
 					self.stats['sched-without-stops'] += 1
 					continue
 
-				trip_hash, trip_stops = [s.train_uid], list()
+				sched_stops = list()
 
 				# XXX: time conversions - DTD->GTFS
 				ts_prev, ts_origin = None, min(filter(None, it.chain.from_iterable(
@@ -595,50 +602,57 @@ class DTDtoGTFS:
 					if ts_dep < ts_arr: ts_dep += one_day
 					ts_prev = ts_dep
 
-					trip_stops.append((st, GTFSPickupType.regular, ts_arr, ts_dep))
-					trip_hash.append((st.crs_code, ts_arr.total_seconds(), ts_dep.total_seconds()))
+					sched_stops.append(ScheduleStop(st.crs_code, ts_arr, ts_dep))
 
-				### Trip deduplication
+				sched = Schedule(s, sched_stops, svc_span)
+				train_schedules.add(sched)
 
-				if len(trip_stops) < 2:
+			yield from train_schedules
+
+
+	def schedules_to_trips(self, schedules):
+		'''Process cif.schedule entries, populating gtfs.trips and gtfs.stop_times.
+			Returns "trip_svc_timespans" index of {trip_id: timespans},
+				to populate gtfs.calendar and gtfs.calendar_dates tables after some merging.
+			As gtfs.calendar is still empty, all created trips don't have valid service_id value set.'''
+		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
+
+		# Only one gtfs.trip_id is created for
+		#  same trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
+		route_merge_idx = dict() # {(src, dst}: id}
+		trip_merge_idx = dict() # {trip_hash: gtfs.trip_id}
+
+		for s in schedules:
+
+				if len(s.stops) < 2: # XXX: find out what these represent
 					self.stats['trip-no-stops'] += 1
 					continue
 
-				trip_hash = hash(tuple(trip_hash))
-				if trip_hash in trip_merge_idx:
+				### Trip deduplication
+
+				if s in trip_merge_idx:
 					self.stats['trip-dedup'] += 1
-					trip_id = trip_merge_idx[trip_hash]
-					trip_svc_timespans[trip_id].append(svc_span)
+					trip_id = trip_merge_idx[s]
+					trip_svc_timespans[trip_id].extend(s.spans)
 
 				else:
-					trip_id = trip_merge_idx[trip_hash] = len(trip_merge_idx) + 1
+					trip_id = trip_merge_idx[s] = len(trip_merge_idx) + 1
 
-					## Route is created in an ad-hoc fashion here currently, just as a placeholder
-					# These are also deduplicated by start/end stops via route_merge_idx.
-					# XXX: note on route_ids? - "how to do routes? get the toc in from schedule_extra"
-					# XXX: optimize - merge/split same as services?
-					# XXX: route metadata
-					route_key = stops[0].id, stops[-1].id
+					# XXX: insert route info
+					route_key = s.stops[0].id, s.stops[-1].id
 					if route_key in route_merge_idx: route_id = route_merge_idx[route_key]
-					else:
-						route_id = route_merge_idx[route_key] = len(route_merge_idx) + 1
-						self.insert( 'gtfs.routes',
-							route_id=route_id, route_type=int(GTFSRouteType.rail),
-							route_short_name=f'{stops[0].crs_code}-{stops[-1].crs_code}',
-							route_long_name='From {} to {}'.format(*(
-								((stops[n].station_name or '').title() or stops[n].crs_code) for n in [0, -1] )) )
+					else: route_id = route_merge_idx[route_key] = len(route_merge_idx) + 1
 
 					# XXX: check if more trip/stop metadata can be filled-in here
 					self.insert( 'gtfs.trips',
 						trip_id=trip_id, route_id=route_id, service_id=0,
-						trip_headsign=s.train_uid, trip_short_name=s.retail_train_id )
-					for n, (st, pickup_type, ts_arr, ts_dep) in enumerate(trip_stops, 1):
+						trip_headsign=s.trip_headsign, trip_short_name=s.trip_name )
+					for n, st in enumerate(s.stops, 1):
 						self.insert( 'gtfs.stop_times',
-							trip_id=trip_id, pickup_type=int(pickup_type),
-							arrival_time=ts_arr, departure_time=ts_dep,
-							stop_id=st.crs_code, stop_sequence=n )
-					trip_svc_timespans[trip_id].append(svc_span)
-					train_trip_ids.add(trip_id)
+							trip_id=trip_id, pickup_type=int(GTFSPickupType.regular),
+							arrival_time=st.ts_arr, departure_time=st.ts_dep,
+							stop_id=st.id, stop_sequence=n )
+					trip_svc_timespans[trip_id].extend(s.spans)
 
 		self.stats['trip-count'] = len(trip_svc_timespans)
 		return trip_svc_timespans
