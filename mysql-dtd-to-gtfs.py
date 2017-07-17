@@ -436,43 +436,45 @@ class DTDtoGTFS:
 				FROM {self.db_cif}.fixed_link''')
 
 
-	def process_schedules(self, test_run_slice):
-		'''Process cif.schedule entries, populating gtfs.trips and gtfs.stop_times.
-			Returns "trip_svc_timespans" index of {trip_id: timespans},
-				to populate gtfs.calendar and gtfs.calendar_dates tables after some merging.
-			As gtfs.calendar is still empty, all created trips don't have valid service_id value set.'''
-		# XXX: processing of Z schedules
-		# XXX: processing of associations
-		# XXX: routes are also added here in an ad-hoc manner - need to handle these differently later
-		# XXX: stop times can wrap around?
-
-		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
-
+	def get_schedules(self, test_run_slice, z_part=0.3):
 		# Schedules are fetched along with stops that get grouped by python code later
+		# Two tables are queried in order: regular "schedule" and "z_schedule"
+
+		test_run_slice_parts = 0, 0 # only used with test_run_slice
 		if isinstance(test_run_slice, int):
 			train_uid_slice = f'''
 				JOIN
 					( SELECT DISTINCT(train_uid) AS train_uid
-						FROM {self.db_cif}.schedule rs
+						FROM {self.db_cif}.{{z}}schedule rs
 						JOIN
 							(SELECT CEIL(RAND() *
-								(SELECT MAX(id) FROM {self.db_cif}.schedule)) AS id) rss
+								(SELECT MAX(id) FROM {self.db_cif}.{{z}}schedule)) AS id) rss
 							ON rs.id >= rss.id
 						GROUP BY train_uid HAVING COUNT(*) > 0
-						LIMIT {test_run_slice} ) r
+						LIMIT {{z_slice}} ) r
 					ON r.train_uid = s.train_uid'''
+			test_run_slice_parts = int(test_run_slice * z_part)
+			test_run_slice_parts = test_run_slice - test_run_slice_parts, test_run_slice_parts
 		elif test_run_slice:
 			train_uid_slice = ','.join(map(self.escape, test_run_slice))
 			train_uid_slice = f'''
 				JOIN
 					( SELECT DISTINCT(train_uid) AS train_uid
-						FROM {self.db_cif}.schedule rs
+						FROM {self.db_cif}.{{z}}schedule rs
 						WHERE rs.train_uid IN ({train_uid_slice})) r
 					ON r.train_uid = s.train_uid'''
 		else: train_uid_slice = ''
-		schedules = f'''
-			SELECT *
-			FROM {self.db_cif}.schedule s
+
+		q_sched = f'''
+			SELECT
+				{{z_id}} AS id, {{z_tuid}} AS retail_train_id,
+				s.train_uid, runs_from, runs_to, bank_holiday_running,
+				monday, tuesday, wednesday, thursday, friday, saturday, sunday,
+				stp_indicator, location, crs_code, train_category,
+				station_name, public_arrival_time, public_departure_time,
+				scheduled_arrival_time, scheduled_pass_time, scheduled_departure_time,
+				platform, atoc_code, st.id AS stop_id
+			FROM {self.db_cif}.{{z}}schedule s
 			{train_uid_slice}
 			LEFT JOIN {self.db_cif}.schedule_extra e ON e.schedule = s.id
 			LEFT JOIN {self.db_cif}.stop_time st ON st.schedule = s.id
@@ -482,9 +484,33 @@ class DTDtoGTFS:
 				OR ( ps.crs_code IS NOT NULL
 					AND (st.scheduled_arrival_time IS NOT NULL OR st.scheduled_departure_time IS NOT NULL) )
 			ORDER BY s.train_uid, FIELD(s.stp_indicator,'P','N','O','C'), s.id, st.id'''
-		(sched_count,), = self.q(f'SELECT COUNT(*) FROM {self.db_cif}.schedule s {train_uid_slice}')
-		self.log.debug('Fetching cif.schedule entries (test-train-limit={})...', test_run_slice)
-		schedules = self.q(schedules)
+		q_sched_count = f'SELECT COUNT(*) FROM {self.db_cif}.{{z}}schedule s {train_uid_slice}'
+		q_tweaks = list(
+			dict(z=z, z_id=z_id, z_tuid=z_tuid, z_slice=z_slice)
+			for (z, z_id, z_tuid), z_slice in zip([
+				('', 's.id', 'retail_train_id'), ('z_', '500000 + s.id', 'null') ], test_run_slice_parts) )
+
+		sched_counts = list(self.qb(q_sched_count.format(**qt))[0][0] for qt in q_tweaks)
+		self.log.debug('Schedule counts: regular={}, z={}', *sched_counts)
+		yield sum(sched_counts)
+
+		for sched_count, qt in zip(sched_counts, q_tweaks):
+			self.log.debug(
+				'Fetching cif.{}schedule entries (count={}, test-train-limit={}/{})...',
+				qt['z'], sched_count, qt['z_slice'] or 'NA', test_run_slice )
+			for s in self.q(q_sched.format(**qt)): yield s
+
+	def process_schedules(self, test_run_slice):
+		'''Process cif.schedule entries, populating gtfs.trips and gtfs.stop_times.
+			Returns "trip_svc_timespans" index of {trip_id: timespans},
+				to populate gtfs.calendar and gtfs.calendar_dates tables after some merging.
+			As gtfs.calendar is still empty, all created trips don't have valid service_id value set.'''
+		# XXX: processing of associations
+		# XXX: routes are also added here in an ad-hoc manner - need to handle these differently later
+
+		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
+		schedules = self.get_schedules(test_run_slice)
+		sched_count = next(schedules)
 
 		# Only one gtfs.trip_id is created for
 		#  same trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
@@ -544,7 +570,7 @@ class DTDtoGTFS:
 					if s.stp_indicator == 'C': continue # have no associated trip, unlike stp=O/N
 
 				### Processing for trip stops
-				if s.location is None or s.tiploc_code is None:
+				if s.location is None:
 					# self.log.info('Skipping schedule with no usable stops: {}', s)
 					self.stats['sched-without-stops'] += 1
 					continue
