@@ -124,16 +124,16 @@ GTFSRouteType = enum.IntEnum( 'RouteType',
 GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0)
 GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 
-GTFSTSMerge = collections.namedtuple('TSMerge', 't span')
-GTFSTSMergeType = enum.IntEnum( 'TSMergeType',
+TimespanMerge = collections.namedtuple('TSMerge', 't span')
+TimespanMergeType = enum.IntEnum( 'TSMergeType',
 	'none same inc inc_diff_weekdays overlap bridge', start=0 )
-GTFSTSDiff = collections.namedtuple('TSMerge', 't spans')
-GTFSTSDiffType = enum.IntEnum('TSDiffType', 'none full split move exc', start=0)
+TimespanDiff = collections.namedtuple('TSMerge', 't spans')
+TimespanDiffType = enum.IntEnum('TSDiffType', 'none full split move exc', start=0)
 
-class GTFSTimespanEmpty(Exception): pass
+class TimespanEmpty(Exception): pass
 
 @ft.total_ordering
-class GTFSTimespan:
+class Timespan:
 
 	weekday_order = 'monday tuesday wednesday thursday friday saturday sunday'.split()
 
@@ -142,7 +142,7 @@ class GTFSTimespan:
 		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
 		self.weekdays = tuple(map(int, weekdays))
 		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
-		except StopIteration: raise GTFSTimespanEmpty(str(self)) from None
+		except StopIteration: raise TimespanEmpty(str(self)) from None
 		self.except_days = frozenset(filter(
 			( lambda day: self.start <= day <= self.end
 				and self.weekdays[day.weekday()] ), self.except_days ))
@@ -194,7 +194,7 @@ class GTFSTimespan:
 			s1.except_days | s2.except_days )
 
 	def merge(self, span, exc_days_to_split=10):
-		'''Return GTFSTSMerge value,
+		'''Return TimespanMerge value,
 				with either new merged timespan or None if it's not possible.
 			exc_days_to_split = number of days in sequence
 				to tolerate as exceptions when merging two spans with small gap in-between.'''
@@ -204,44 +204,44 @@ class GTFSTimespan:
 			if ( b == s2.end
 					and tuple(d1|d2 for d1,d2 in zip(s1.weekdays, s2.weekdays)) == s1.weekdays
 					and s1.except_days.issuperset(s2.except_days) ):
-				return GTFSTSMerge( GTFSTSMergeType.inc_diff_weekdays,
-					GTFSTimespan(s1.start, s1.end, s1.weekdays, self.exc_days_overlap(s1, s2, a, b)) )
+				return TimespanMerge( TimespanMergeType.inc_diff_weekdays,
+					Timespan(s1.start, s1.end, s1.weekdays, self.exc_days_overlap(s1, s2, a, b)) )
 		else:
-			if s1 == s2: return GTFSTSMerge(GTFSTSMergeType.same, s1)
+			if s1 == s2: return TimespanMerge(TimespanMergeType.same, s1)
 			if a and b: # overlap
-				return GTFSTSMerge(GTFSTSMergeType.overlap, GTFSTimespan(
+				return TimespanMerge(TimespanMergeType.overlap, Timespan(
 					s1.start, max(s1.end, s2.end), weekdays, self.exc_days_overlap(s1, s2, a, b) ))
 			if len(list(self.date_range(s1.end, s2.start, weekdays))) <= exc_days_to_split: # bridge
-				return GTFSTSMerge(GTFSTSMergeType.bridge, GTFSTimespan(
+				return TimespanMerge(TimespanMergeType.bridge, Timespan(
 					s1.start, max(s1.end, s2.end), weekdays,
 					set( s1.except_days | s2.except_days |
 						set(self.date_range(s1.end + one_day, s2.start - one_day, weekdays)) ) ))
-		return GTFSTSMerge(GTFSTSMergeType.none, None)
+		return TimespanMerge(TimespanMergeType.none, None)
 
 	def _difference_range(self, span, exc_days_to_split=10):
 		'''Try to subtract overlap range from timespan,
 				either by moving start/end or splitting it in two.
-			Returns either GTFSTSDiff or None if it cannot be done this way.'''
+			Returns either TimespanDiff or None if it cannot be done this way.'''
 		if tuple(d1|d2 for d1,d2 in zip(self.weekdays, span.weekdays)) != span.weekdays: return
 		s1, s2, a, b = self.date_overlap(self, span)
-		if not (a and b): return GTFSTSDiff(GTFSTSDiffType.none, [self])
+		if not (a and b): return TimespanDiff(TimespanDiffType.none, [self])
 		svc_days = set(self.date_range(a, b, self.weekdays, self.except_days))
 		if span.except_days.issuperset(svc_days): # all service days are exceptions in overlay
-			return GTFSTSDiff(GTFSTSDiffType.none, [self])
+			return TimespanDiff(TimespanDiffType.none, [self])
 		if svc_days.intersection(span.except_days): return # XXX: need "added" exceptions here
 		start, end = self.start, self.end
-		if a == start and b == end: return GTFSTSDiff(GTFSTSDiffType.full, [])
+		if a == start and b == end: return TimespanDiff(TimespanDiffType.full, [])
 		if a != start and b != end: # split in two, unless only few exc_days required to bridge
 			if len(svc_days.difference(span.except_days)) >= exc_days_to_split:
-				return GTFSTSDiff(GTFSTSDiffType.split, [
-					GTFSTimespan(start, span.start - one_day, self.weekdays, self.except_days),
-					GTFSTimespan(span.end + one_day, end, self.weekdays, self.except_days) ])
+				return TimespanDiff(TimespanDiffType.split, [
+					Timespan(start, span.start - one_day, self.weekdays, self.except_days),
+					Timespan(span.end + one_day, end, self.weekdays, self.except_days) ])
 			return
 		# Remaining case is (a == start or b == end) - move start/end accordingly
 		if a == start: start = b + one_day
 		else: end = a - one_day
-		return GTFSTSDiff( GTFSTSDiffType.move,
-			[GTFSTimespan(start, end, self.weekdays, self.except_days)] )
+		return TimespanDiff( TimespanDiffType.move,
+			[Timespan(start, end, self.weekdays, self.except_days)] )
 
 	def difference(self, span):
 		'''Return new timespan(s) with specified one excluded from it on None if there is no overlap.
@@ -252,11 +252,11 @@ class GTFSTimespan:
 		if diff: return diff
 		# Otherwise add all days of the overlay timespan as exceptions
 		try:
-			span_diff = GTFSTimespan( self.start, self.end,
+			span_diff = Timespan( self.start, self.end,
 				self.weekdays, self.except_days | frozenset(span.date_iter()) )
-		except GTFSTimespanEmpty: return GTFSTSDiff(GTFSTSDiffType.full, [])
-		if span_diff == self: return GTFSTSDiff(GTFSTSDiffType.none, [self])
-		return GTFSTSDiff(GTFSTSDiffType.exc, [span_diff])
+		except TimespanEmpty: return TimespanDiff(TimespanDiffType.full, [])
+		if span_diff == self: return TimespanDiff(TimespanDiffType.none, [self])
+		return TimespanDiff(TimespanDiffType.exc, [span_diff])
 
 
 class DTDtoGTFS:
@@ -465,6 +465,7 @@ class DTDtoGTFS:
 					ON r.train_uid = s.train_uid'''
 		else: train_uid_slice = ''
 
+		# XXX: processing for train_category, platform, atoc_code, stop_id, etc
 		q_sched = f'''
 			SELECT
 				{{z_id}} AS id, {{z_tuid}} AS retail_train_id,
@@ -491,6 +492,7 @@ class DTDtoGTFS:
 				('', 's.id', 'retail_train_id'), ('z_', '500000 + s.id', 'null') ], test_run_slice_parts) )
 
 		sched_counts = list(self.qb(q_sched_count.format(**qt))[0][0] for qt in q_tweaks)
+		self.stats['sched-count-z'] = sched_counts[1]
 		self.log.debug('Schedule counts: regular={}, z={}', *sched_counts)
 		yield sum(sched_counts)
 
@@ -544,11 +546,11 @@ class DTDtoGTFS:
 				# Bank holidays only apply for stp=P schedules that have bank_holiday_running=0
 
 				try:
-					svc_span = GTFSTimespan( s.runs_from, s.runs_to,
-						weekdays=tuple(getattr(s, k) for k in GTFSTimespan.weekday_order),
+					svc_span = Timespan( s.runs_from, s.runs_to,
+						weekdays=tuple(getattr(s, k) for k in Timespan.weekday_order),
 						except_days=self.bank_holidays
 							if s.stp_indicator == 'P' and not s.bank_holiday_running else None )
-				except GTFSTimespanEmpty:
+				except TimespanEmpty:
 					self.stats['svc-empty-sched'] += 1
 					continue
 
