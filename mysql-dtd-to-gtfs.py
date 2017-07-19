@@ -77,6 +77,9 @@ def iter_range(a, b, step):
 		if v == b: break
 		v += step
 
+iter_chain = it.chain.from_iterable
+list_chain = lambda v: list(iter_chain(v))
+
 
 class NTCursor(pymysql.cursors.SSDictCursor):
 	'Returns namedtuple for each row.'
@@ -171,6 +174,10 @@ class Timespan:
 			self.weekdays, self.except_days, reverse=reverse )
 
 	@staticmethod
+	def date_iter_set(span_set):
+		return sorted(set(iter_chain(s.date_iter() for s in span_set)))
+
+	@staticmethod
 	def date_range(a, b, weekdays=None, except_days=None, reverse=False):
 		if a > b: return
 		if reverse: a, b = b, a
@@ -219,7 +226,7 @@ class Timespan:
 		return TimespanMerge(TimespanMergeType.none, None)
 
 	@classmethod
-	def merge_set(self, spans):
+	def merge_set(cls, spans):
 		if len(spans) <= 1: return TimespanMerge(list(), spans)
 		span_set, merge_ops = set(spans), list()
 		while True:
@@ -276,15 +283,31 @@ class Timespan:
 		return TimespanDiff(TimespanDiffType.exc, [span_diff])
 
 	@classmethod
-	def subtract_from_set(self, span_set, span):
-		'''Subtract timespan from each span in the specified set.
-			Returns tuple of two lists -  TimespanDiffType
-				for each of the initial spans and updated (or same, if no diffs) span_set.'''
-		diffs = list(s.difference(span) for s in span_set)
-		diff_types = list(map(op.attrgetter('t'), diffs))
-		if any(diff_types):
-			span_set = list(it.chain.from_iterable(map(op.attrgetter('spans'), diffs)))
-		return diff_types, span_set
+	def difference_set(cls, spans1, spans2):
+		if isinstance(spans2, cls): spans2 = [spans2]
+		diff_types = list()
+		for span in spans2:
+			diffs = list(s.difference(span) for s in spans1)
+			diff_types = list(map(op.attrgetter('t'), diffs))
+			if any(diff_types):
+				spans1 = list_chain(map(op.attrgetter('spans'), diffs))
+				diff_types.extend(filter(None, diff_types))
+			return TimespanDiff(diff_types, spans1)
+
+	def intersection(self, span):
+		'Returns None or single span corresponding to intersection.'
+		# XXX: maybe best to produce multiple spans?
+		s1, s2, a, b = self.date_overlap(self, span)
+		if not (a and b): return
+		try:
+			return Timespan( a, b,
+				tuple(d1&d2 for d1,d2 in zip(s1.weekdays, s2.weekdays)),
+				s1.except_days & s2.except_days )
+		except TimespanEmpty: return # due to weekdays/exceptions
+
+	@classmethod
+	def intersection_set(cls, spans1, spans2):
+		return list(s1.intersection(s2) for s1,s2 in it.product(spans1, spans2))
 
 
 ScheduleStop = collections.namedtuple('SchedStop', 'id ts_arr ts_dep')
@@ -292,37 +315,21 @@ ScheduleSet = collections.namedtuple('SchedSet', 'train_uid sched_list')
 
 class Schedule:
 
-	def __init__(self, s, stops, span):
-		self.sched_id, self.trip_name = s.id, s.retail_train_id
-		self.train_uid = self.trip_headsign = s.train_uid
-		self.stops, self.spans = tuple(stops), [span]
+	def __init__(self, train_uid, stops, spans, **meta):
+		self.train_uid, self.stops, self.spans, self.meta = train_uid, tuple(stops), spans, meta
 		self._hash_tuple = self.train_uid, self.stops
 
 	def __eq__(self, s): return self._hash_tuple == s._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
 
-	def subtract_timespan(self, svc_span):
-		diff_types, self.spans = Timespan.subtract_from_set(self.spans, svc_span)
+	def subtract_timespan(self, span):
+		diff_types, self.spans = Timespan.difference_set(self.spans, span)
 		return diff_types
 
 
-class AssocSet:
-
-	def __init__(self, assoc_map, sched_map=None):
-		self.assoc_map, self.sched_map = assoc_map, sched_map or dict()
-
-	@property
-	def sched_map_complete(self):
-		return len(self.sched_map) >= len(self.assoc_map)
-
-	def add_sched_set(self, ss):
-		self.sched_map[ss.train_uid] = ss.sched_list
-		return self.sched_map_complete
-
-	def apply(self):
-		assert not set(self.assoc_map).difference(self.sched_map)
-		return list(it.chain.from_iterable(self.sched_map.values()))
-
+AssocType = enum.IntEnum('AssocType', 'split join')
+AssocQuirk = enum.IntEnum('AssocApply', 'no_stop no_base leftovers')
+AssocApply = collections.namedtuple('AssocApply', 'quirks scheds')
 
 class Association:
 
@@ -331,12 +338,39 @@ class Association:
 		self.spans = [span]
 		self._hash_tuple = self.base, self.assoc, self.stop
 
-	def __eq__(self, s): return self._hash_tuple == s._hash_tuple
+	def __eq__(self, a): return self._hash_tuple == a._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
 
-	def subtract_timespan(self, assoc_span):
-		diff_types, self.spans = Timespan.subtract_from_set(self.spans, assoc_span)
+	def subtract_timespan(self, span):
+		diff_types, self.spans = Timespan.difference_set(self.spans, span)
 		return diff_types
+
+	def apply(self, sched_list, sched_spans, sched_base):
+		'''Return list of new list of Schedules with this Association
+			applied to sched_list on sched_spans Timespan intersections,
+			using sched_base as a base train schedule for splits/joins
+			(can be str uid if not n/a).'''
+		quirks, sched_res = list(), list()
+		if isinstance(sched_base, str):
+			quirks.append(AssocQuirk.no_base)
+			sched_base_uid, sched_base = sched_base, None
+		else: sched_base_uid = sched_base.train_uid
+		for sched, assoc_spans in zip(sched_list, sched_spans):
+			head, tail = sched_base.stops, sched.stops
+			if assoc.t == AssocType.split: head, tail = tail, head
+			stop_check = lambda s,chk_id=assoc.stop: s.id != chk_id
+			stops = list(it.chain(
+				it.takewhile(stop_check, head), it.dropwhile(stop_check, tail) ))
+			if not stops:
+				quirks.append(AssocQuirk.no_stop)
+				continue
+			train_uid = f'{sched.train_uid}_{sched_base.train_uid}' # compat with ts
+			sched_res.append(Schedule(train_uid, stops, assoc_spans, **sched.meta))
+			diffs = Timespan.difference_set(sched.spans, assoc_spans)
+			if diffs.t: # leftover schedule bits
+				sched_res.append(Schedule(sched.train_uid, sched.stops, diffs.spans, **sched.meta))
+				quirks.append(AssocQuirk.leftovers)
+		return AssocApply(quirks, sched_res)
 
 
 class DTDtoGTFS:
@@ -649,16 +683,17 @@ class DTDtoGTFS:
 					ts_arr, ts_dep = st.public_arrival_time, st.public_departure_time
 					# XXX: check if origin has some arrival time indication in CIF data
 					ts_arr, ts_dep = ts_arr or ts_dep, ts_dep or ts_arr # origin/termination stops
-					if not (ts_arr and ts_dep): continue
 
 					# Midnight rollover and sanity check
-					if (ts_prev or ts_origin) > ts_arr: ts_arr += one_day
-					if ts_dep < ts_arr: ts_dep += one_day
-					ts_prev = ts_dep
+					if ts_arr and ts_dep:
+						if (ts_prev or ts_origin) > ts_arr: ts_arr += one_day
+						if ts_dep < ts_arr: ts_dep += one_day
+						ts_prev = ts_dep
 
 					sched_stops.append(ScheduleStop(st.crs_code, ts_arr, ts_dep))
 
-				sched = Schedule(s, sched_stops, svc_span)
+				sched = Schedule( s.train_uid, sched_stops, [svc_span],
+					trip_short_name=s.retail_train_id, trip_headsign=s.train_uid )
 				train_schedules.append(sched)
 
 			yield ScheduleSet(train_uid, train_schedules)
@@ -668,18 +703,19 @@ class DTDtoGTFS:
 		'''Build a map for association graphs, where for every train_uid
 				that has any association info, list of corresponding association sets can be found.
 			When all Schedules for train_uids in AssocSet.assoc_map are gathered, it can be processed.'''
+		# XXX: look more closely into how same-day multi-base assoc records work
 		self.log.debug('Constructing train association map...')
 
 		### First associations are parsed and indexed by base_train_uid,
 		###  then gathered into AssocSets - association graph for a set of trains.
-		assoc_idx_base = collections.defaultdict(list) # {base_train_uid: [assoc]}
+		assoc_map = collections.defaultdict(list) # {train_uid: [assoc]}
 		assoc_list = self.qb(f'''
 			SELECT *
 			FROM {self.db_cif}.association a
 			JOIN {self.db_cif}.tiploc tl ON a.assoc_location = tl.tiploc_code
 			ORDER BY a.base_uid, a.assoc_uid, FIELD(a.stp_indicator,'P','O','N','C'), a.id''')
 		for key, group in it.groupby(assoc_list, key=op.attrgetter('base_uid', 'assoc_uid')):
-			trains_assoc = dict()
+			trains_assoc = set() # records for base-assoc pair
 			for a in group:
 				try:
 					assoc_span = Timespan( a.start_date, a.end_date,
@@ -694,43 +730,50 @@ class DTDtoGTFS:
 							assoc2.spans.append(assoc_span)
 						else: assoc2.subtract_timespan(assoc_span)
 					if a.stp_indicator == 'C': continue
-				if assoc not in trains_assoc: trains_assoc[assoc] = assoc
+				if assoc not in trains_assoc: trains_assoc.add(assoc)
 			for assoc in trains_assoc:
-				merge = Timespan.merge_set(assoc.spans)
-				if merge.t:
-					for mt in merge.t:
-						self.stats['assoc-merge-op'] += 1
-						self.stats[f'assoc-merge-op-{mt.name}'] += 1
-					self.stats['assoc-merge'] += 1
-					assoc.spans = merge.span
-				assoc_idx_base[assoc.base].append(assoc)
-
-		# Graphs in AssocSet.assoc_map are cyclical, as trains can split and re-join
-		assoc_map = dict() # {train_uid: [AssocSet]}
-		for assoc_base, assoc_list in assoc_idx_base.items():
-			assoc_idx, assoc_queue = dict(), collections.deque(assoc_list)
-			while assoc_queue:
-				assoc = assoc_queue.popleft()
-				assoc_idx.setdefault(assoc.base, list()).append(assoc)
-				if not assoc_idx.get(assoc.assoc):
-					assoc_idx[assoc.assoc] = list() # leaf node
-					assoc_queue.extend(assoc_idx_base.get(assoc.assoc, list()))
-			assoc_set = AssocSet(assoc_idx)
-			for train_uid in assoc_idx:
-				assoc_map.setdefault(train_uid, list()).append(assoc_set)
-
+				# XXX: merge here is probably a bad idea, as assocs match w/ schedules
+				# merge = Timespan.merge_set(assoc.spans)
+				# if merge.t:
+				# 	for mt in merge.t:
+				# 		self.stats['assoc-merge-op'] += 1
+				# 		self.stats[f'assoc-merge-op-{mt.name}'] += 1
+				# 	self.stats['assoc-merge'] += 1
+				# 	assoc.spans = merge.span
+				for train_uid in assoc.base, assoc.assoc:
+					assoc_map[train_uid].append(assoc)
 		return assoc_map
 
 	def apply_associations(self, schedule_sets):
 		'''Iterate over Schedule entries,
 			applying cif.associations (joins/splits) to them where necessary.'''
 		assoc_map = self.get_assoc_map()
+		assoc_base, assoc_scheds = dict(), list()
+
+		### First all no-assoc schedules fall through, with assoc ones buffered
+		# Buffering is needed to populate assoc_base
 		for ss in schedule_sets:
-			schedules = ss.sched_list
-			for assoc_set in assoc_map.get(ss.train_uid, list()):
-				if not assoc_set.add_sched_set(ss): continue
-				schedules = assoc_set.apply()
+			schedules = set(ss.sched_list)
+			for assoc in assoc_map.get(ss.train_uid, list()):
+				if assoc.base == ss.train_uid: assoc_base[assoc.base] = ss
+				if assoc.assoc == ss.train_uid:
+					# XXX: use next/prev day assoc attrs here
+					assoc_sched_list, assoc_sched_spans = list(), list()
+					for sched in ss.sched_list:
+						spans = Timespan.intersection_set(sched.spans, assoc.spans)
+						if spans:
+							assoc_sched_list.append(sched)
+							assoc_sched_spans.append(spans)
+					assoc_scheds.append((assoc, assoc_sched_list, assoc_sched_spans))
+					schedules.difference_update(assoc_sched_list)
 			yield from schedules
+
+		for assoc, sched_list, sched_spans in assoc_scheds:
+			# Some train_uids have no associated schedules, e.g. EuroStar trains
+			sched_base = assoc_base.get(assoc.base) or assoc.base
+			assoc_res = assoc.apply(sched_list, sched_spans, sched_base)
+			for quirk in assoc_res.quirks: self.stats[f'assoc-quirk-{quirk.name}'] += 1
+			yield from assoc_res.scheds
 
 	def schedules_to_trips(self, schedules):
 		'''Process Schedule entries, populating gtfs.trips and gtfs.stop_times.
@@ -767,9 +810,9 @@ class DTDtoGTFS:
 
 					# XXX: check if more trip/stop metadata can be filled-in here
 					self.insert( 'gtfs.trips',
-						trip_id=trip_id, route_id=route_id, service_id=0,
-						trip_headsign=s.trip_headsign, trip_short_name=s.trip_name )
+						trip_id=trip_id, route_id=route_id, service_id=0, **s.meta )
 					for n, st in enumerate(s.stops, 1):
+						if not (st.ts_arr and st.ts_dep): continue # non-public stop
 						self.insert( 'gtfs.stop_times',
 							trip_id=trip_id, pickup_type=int(GTFSPickupType.regular),
 							arrival_time=st.ts_arr, departure_time=st.ts_dep,
