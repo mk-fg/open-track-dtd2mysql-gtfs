@@ -288,26 +288,35 @@ class Timespan:
 		diff_types = list()
 		for span in spans2:
 			diffs = list(s.difference(span) for s in spans1)
-			diff_types = list(map(op.attrgetter('t'), diffs))
-			if any(diff_types):
+			diffs_ext = list(map(op.attrgetter('t'), diffs))
+			if any(diffs_ext):
 				spans1 = list_chain(map(op.attrgetter('spans'), diffs))
-				diff_types.extend(filter(None, diff_types))
-			return TimespanDiff(diff_types, spans1)
+				diff_types.extend(filter(None, diffs_ext))
+		return TimespanDiff(diff_types, spans1)
 
 	def intersection(self, span):
 		'Returns None or single span corresponding to intersection.'
-		# XXX: maybe best to produce multiple spans?
 		s1, s2, a, b = self.date_overlap(self, span)
 		if not (a and b): return
 		try:
 			return Timespan( a, b,
 				tuple(d1&d2 for d1,d2 in zip(s1.weekdays, s2.weekdays)),
-				s1.except_days & s2.except_days )
+				s1.except_days | s2.except_days )
 		except TimespanEmpty: return # due to weekdays/exceptions
 
 	@classmethod
 	def intersection_set(cls, spans1, spans2):
-		return list(s1.intersection(s2) for s1,s2 in it.product(spans1, spans2))
+		return list(filter( None,
+			(s1.intersection(s2) for s1,s2 in it.product(spans1, spans2)) ))
+
+	@classmethod
+	def shift_set(cls, spans, offset):
+		if not spans or offset == 0: return spans
+		offset_days = offset * one_day
+		return list(Timespan(
+			span.start + offset_days, span.end + offset_days,
+			tuple(span.weekdays[(n-offset)%7] for n in range(7)),
+			set(day + offset_days for day in span.except_days) ) for span in spans)
 
 
 ScheduleStop = collections.namedtuple('SchedStop', 'id ts_arr ts_dep')
@@ -322,54 +331,67 @@ class Schedule:
 	def __eq__(self, s): return self._hash_tuple == s._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
 
+	def copy(self, **updates):
+		state = self.meta.copy()
+		state.update((k, getattr(self, k)) for k in 'train_uid stops spans'.split())
+		state.update(updates)
+		return Schedule(**state)
+
 	def subtract_timespan(self, span):
 		diff_types, self.spans = Timespan.difference_set(self.spans, span)
 		return diff_types
 
+	def partition(self, spans):
+		'Return timespans for intersection and difference from specified set of spans.'
+		diffs = Timespan.difference_set(self.spans, spans)
+		overlaps = Timespan.intersection_set(self.spans, spans)
+		return overlaps, diffs.spans
+
 
 AssocType = enum.IntEnum('AssocType', 'split join')
-AssocQuirk = enum.IntEnum('AssocApply', 'no_stop no_base leftovers')
+AssocQuirk = enum.IntEnum('AssocApply', 'no_stop no_base')
 AssocApply = collections.namedtuple('AssocApply', 'quirks scheds')
 
 class Association:
 
-	def __init__(self, a, span):
-		self.base, self.assoc, self.stop = a.base_uid, a.assoc_uid, a.crs_code
-		self.spans = [span]
+	def __init__(self, base, assoc, t, stop, assoc_next_day, spans):
+		self.base, self.assoc, self.t, self.stop, self.spans = base, assoc, t, stop, spans
+		self.spans_assoc_offset = int(bool(assoc_next_day))
+		self.spans_assoc = Timespan.shift_set(self.spans, self.spans_assoc_offset)
 		self._hash_tuple = self.base, self.assoc, self.stop
 
-	def __eq__(self, a): return self._hash_tuple == a._hash_tuple
+	def __eq__(self, assoc): return self._hash_tuple == assoc._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
 
 	def subtract_timespan(self, span):
 		diff_types, self.spans = Timespan.difference_set(self.spans, span)
 		return diff_types
 
-	def apply(self, sched_list, sched_spans, sched_base):
-		'''Return list of new list of Schedules with this Association
-			applied to sched_list on sched_spans Timespan intersections,
-			using sched_base as a base train schedule for splits/joins
-			(can be str uid if not n/a).'''
+	def apply(self, scheds_base, scheds_assoc):
+		'''Return new list of Schedules with this Association applied to scheds_assoc,
+			using scheds_base (can be empty) as a base train Schedules for assoc timespan(s).'''
 		quirks, sched_res = list(), list()
-		if isinstance(sched_base, str):
+		if not scheds_base:
 			quirks.append(AssocQuirk.no_base)
-			sched_base_uid, sched_base = sched_base, None
-		else: sched_base_uid = sched_base.train_uid
-		for sched, assoc_spans in zip(sched_list, sched_spans):
-			head, tail = sched_base.stops, sched.stops
-			if assoc.t == AssocType.split: head, tail = tail, head
-			stop_check = lambda s,chk_id=assoc.stop: s.id != chk_id
+			scheds_base = [None]
+		for sched, sched_base in it.product(scheds_assoc, scheds_base):
+			if sched_base:
+				spans, diffs = sched.partition(sched_base.spans)
+				if not spans: continue
+				# XXX: can base schedules change in assoc timespan?
+				assert not diffs, [self.base, self.assoc, Timespan.merge_set(spans).span, diffs]
+			else: spans = sched.spans
+			head, tail = sched_base.stops if sched_base else list(), sched.stops
+			if self.t == AssocType.split: head, tail = tail, head
+			stop_check = lambda s,chk_id=self.stop: s.id != chk_id
 			stops = list(it.chain(
 				it.takewhile(stop_check, head), it.dropwhile(stop_check, tail) ))
-			if not stops:
+			if len(stops) < 2:
 				quirks.append(AssocQuirk.no_stop)
 				continue
-			train_uid = f'{sched.train_uid}_{sched_base.train_uid}' # compat with ts
-			sched_res.append(Schedule(train_uid, stops, assoc_spans, **sched.meta))
-			diffs = Timespan.difference_set(sched.spans, assoc_spans)
-			if diffs.t: # leftover schedule bits
-				sched_res.append(Schedule(sched.train_uid, sched.stops, diffs.spans, **sched.meta))
-				quirks.append(AssocQuirk.leftovers)
+			sched_res.append(sched.copy(
+				stops=stops, spans=spans,
+				train_uid=f'{self.assoc}_{self.base}' ))
 		return AssocApply(quirks, sched_res)
 
 
@@ -708,7 +730,8 @@ class DTDtoGTFS:
 
 		### First associations are parsed and indexed by base_train_uid,
 		###  then gathered into AssocSets - association graph for a set of trains.
-		assoc_map = collections.defaultdict(list) # {train_uid: [assoc]}
+		assoc_map = collections.defaultdict(lambda: (list(), list())) # {train_uid: [base, assoc]}
+		assoc_types = dict(VV=AssocType.split, JJ=AssocType.join)
 		assoc_list = self.qb(f'''
 			SELECT *
 			FROM {self.db_cif}.association a
@@ -717,10 +740,16 @@ class DTDtoGTFS:
 		for key, group in it.groupby(assoc_list, key=op.attrgetter('base_uid', 'assoc_uid')):
 			trains_assoc = set() # records for base-assoc pair
 			for a in group:
+				at = assoc_types.get(a.assoc_cat) # stp=C rows can have empty type
+				self.stats[ f'assoc-type-{at.name}'
+					if at else 'assoc-type-{}'.format(a.assoc_cat or 'null') ] += 1
+				if a.assoc_date_ind not in [None, 'N', 'S']:
+					self.stats[f'assoc-date-ind-{a.assoc_date_ind}'] += 1
 				try:
 					assoc_span = Timespan( a.start_date, a.end_date,
 						weekdays=tuple(getattr(a, k) for k in Timespan.weekday_order) )
-					assoc = Association(a, assoc_span)
+					assoc = Association( a.base_uid, a.assoc_uid,
+						at, a.crs_code, a.assoc_date_ind == 'N', [assoc_span] )
 				except TimespanEmpty:
 					self.stats['assoc-empty-span'] += 1
 					continue
@@ -730,7 +759,7 @@ class DTDtoGTFS:
 							assoc2.spans.append(assoc_span)
 						else: assoc2.subtract_timespan(assoc_span)
 					if a.stp_indicator == 'C': continue
-				if assoc not in trains_assoc: trains_assoc.add(assoc)
+				if assoc.t and assoc not in trains_assoc: trains_assoc.add(assoc)
 			for assoc in trains_assoc:
 				# XXX: merge here is probably a bad idea, as assocs match w/ schedules
 				# merge = Timespan.merge_set(assoc.spans)
@@ -740,38 +769,37 @@ class DTDtoGTFS:
 				# 		self.stats[f'assoc-merge-op-{mt.name}'] += 1
 				# 	self.stats['assoc-merge'] += 1
 				# 	assoc.spans = merge.span
-				for train_uid in assoc.base, assoc.assoc:
-					assoc_map[train_uid].append(assoc)
+				for n, train_uid in enumerate([assoc.base, assoc.assoc]):
+					assoc_map[train_uid][n].append(assoc)
 		return assoc_map
 
 	def apply_associations(self, schedule_sets):
 		'''Iterate over Schedule entries,
 			applying cif.associations (joins/splits) to them where necessary.'''
 		assoc_map = self.get_assoc_map()
-		assoc_base, assoc_scheds = dict(), list()
+		assoc_base, assoc_scheds = collections.defaultdict(list), collections.defaultdict(list)
 
-		### First all no-assoc schedules fall through, with assoc ones buffered
-		# Buffering is needed to populate assoc_base
+		### Buffer non-base Schedules that are used in associations
+		# Relevant slices of base schedules are also stored
+		#  in assoc_base to splice their stops into assoc ones later.
 		for ss in schedule_sets:
-			schedules = set(ss.sched_list)
-			for assoc in assoc_map.get(ss.train_uid, list()):
-				if assoc.base == ss.train_uid: assoc_base[assoc.base] = ss
-				if assoc.assoc == ss.train_uid:
-					# XXX: use next/prev day assoc attrs here
-					assoc_sched_list, assoc_sched_spans = list(), list()
-					for sched in ss.sched_list:
-						spans = Timespan.intersection_set(sched.spans, assoc.spans)
-						if spans:
-							assoc_sched_list.append(sched)
-							assoc_sched_spans.append(spans)
-					assoc_scheds.append((assoc, assoc_sched_list, assoc_sched_spans))
-					schedules.difference_update(assoc_sched_list)
-			yield from schedules
+			schedules, assoc_spans = ss.sched_list.copy(), list()
+			assocs_base, assocs = assoc_map[ss.train_uid]
+			for assoc, sched in it.product(assocs_base, schedules):
+				overlaps, diffs = sched.partition(assoc.spans)
+				if overlaps: assoc_base[assoc].append(sched.copy(spans=overlaps))
+			for assoc, sched in it.product(assocs, schedules):
+				overlaps, diffs = sched.partition(assoc.spans_assoc)
+				if not overlaps: continue
+				assoc_spans.extend(assoc.spans_assoc)
+				assoc_scheds[assoc].append(sched.copy(
+					spans=Timespan.shift_set(overlaps, -assoc.spans_assoc_offset) ))
+			for sched in schedules: sched.subtract_timespan(assoc_spans)
+			yield from filter(op.attrgetter('spans'), schedules)
 
-		for assoc, sched_list, sched_spans in assoc_scheds:
-			# Some train_uids have no associated schedules, e.g. EuroStar trains
-			sched_base = assoc_base.get(assoc.base) or assoc.base
-			assoc_res = assoc.apply(sched_list, sched_spans, sched_base)
+		### Process/flush buffered schedules after applying associations to them
+		for assoc, scheds in assoc_scheds.items():
+			assoc_res = assoc.apply(assoc_base[assoc], scheds)
 			for quirk in assoc_res.quirks: self.stats[f'assoc-quirk-{quirk.name}'] += 1
 			yield from assoc_res.scheds
 
@@ -969,6 +997,7 @@ def main(args=None):
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
+	sys.stdout = open(sys.stdout.fileno(), 'w', 1) # for occasional debug print()'s to work
 	if opts.debug: log = logging.DEBUG
 	elif opts.verbose: log = logging.INFO
 	else: log = logging.WARNING
