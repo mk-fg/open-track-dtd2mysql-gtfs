@@ -130,7 +130,7 @@ GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 TimespanMerge = collections.namedtuple('TSMerge', 't span')
 TimespanMergeType = enum.IntEnum( 'TSMergeType',
 	'none same inc inc_diff_weekdays overlap bridge', start=0 )
-TimespanDiff = collections.namedtuple('TSMerge', 't spans')
+TimespanDiff = collections.namedtuple('TSDiff', 't spans')
 TimespanDiffType = enum.IntEnum('TSDiffType', 'none full split move exc', start=0)
 
 class TimespanEmpty(Exception): pass
@@ -349,7 +349,7 @@ class Schedule:
 
 
 AssocType = enum.IntEnum('AssocType', 'split join')
-AssocQuirk = enum.IntEnum('AssocApply', 'no_stop no_base')
+AssocQuirk = enum.IntEnum('AssocApply', 'no_stop no_base orig_days')
 AssocApply = collections.namedtuple('AssocApply', 'quirks scheds')
 
 class Association:
@@ -370,28 +370,37 @@ class Association:
 	def apply(self, scheds_base, scheds_assoc):
 		'''Return new list of Schedules with this Association applied to scheds_assoc,
 			using scheds_base (can be empty) as a base train Schedules for assoc timespan(s).'''
+		# There have to be one or more base schedule part(s)
+		#  with calendar overlap for each assoc schedule part(s).
+		# Any days missing in sched_base are assumed
+		#  to have original schedule with no association applied.
 		quirks, sched_res = list(), list()
 		if not scheds_base:
 			quirks.append(AssocQuirk.no_base)
 			scheds_base = [None]
-		for sched, sched_base in it.product(scheds_assoc, scheds_base):
-			if sched_base:
-				spans, diffs = sched.partition(sched_base.spans)
-				if not spans: continue
-				# XXX: can base schedules change in assoc timespan?
-				assert not diffs, [self.base, self.assoc, Timespan.merge_set(spans).span, diffs]
-			else: spans = sched.spans
-			head, tail = sched_base.stops if sched_base else list(), sched.stops
-			if self.t == AssocType.split: head, tail = tail, head
-			stop_check = lambda s,chk_id=self.stop: s.id != chk_id
-			stops = list(it.chain(
-				it.takewhile(stop_check, head), it.dropwhile(stop_check, tail) ))
-			if len(stops) < 2:
-				quirks.append(AssocQuirk.no_stop)
-				continue
-			sched_res.append(sched.copy(
-				stops=stops, spans=spans,
-				train_uid=f'{self.assoc}_{self.base}' ))
+		for sched in scheds_assoc:
+			sched_spans_orig = list() # spans with no overlap with any sched_base
+			for sched_base in scheds_base:
+				if sched_base:
+					spans, diffs = sched.partition(sched_base.spans)
+					if not spans: continue
+					sched_spans_orig = Timespan.difference_set(sched_spans_orig, spans).spans
+					if diffs: sched_spans_orig.extend(diffs)
+				else: spans = sched.spans
+				head, tail = sched_base.stops if sched_base else list(), sched.stops
+				if self.t == AssocType.split: head, tail = tail, head
+				stop_check = lambda s,chk_id=self.stop: s.id != chk_id
+				stops = list(it.chain(
+					it.takewhile(stop_check, head), it.dropwhile(stop_check, tail) ))
+				if len(stops) < 2:
+					quirks.append(AssocQuirk.no_stop)
+					continue
+				sched_res.append(sched.copy(
+					stops=stops, spans=spans,
+					train_uid=f'{self.assoc}_{self.base}' ))
+			if sched_spans_orig:
+				quirks.append(AssocQuirk.orig_days)
+				sched_res.append(sched.copy(spans=sched_spans_orig))
 		return AssocApply(quirks, sched_res)
 
 
@@ -631,14 +640,14 @@ class DTDtoGTFS:
 
 		sched_counts = list(self.qb(q_sched_count.format(**qt))[0][0] for qt in q_tweaks)
 		self.stats['sched-count-z'] = sched_counts[1]
-		self.log.debug('Schedule counts: regular={}, z={}', *sched_counts)
+		self.log.debug('Schedule counts: regular={:,}, z={:,}', *sched_counts)
 		yield sum(sched_counts)
 
 		test_run_slice_repr = ( str(test_run_slice)
-			if isinstance(test_run_slice, int) else f'[{len(test_run_slice)} train_uids]' )
+			if isinstance(test_run_slice, int) else f'[{len(test_run_slice):,} train_uids]' )
 		for sched_count, qt in zip(sched_counts, q_tweaks):
 			self.log.debug(
-				'Fetching cif.{}schedule entries (count={}, test-train-limit={}{})...',
+				'Fetching cif.{}schedule entries (count={:,}, test-train-limit={}{})...',
 				qt['z'], sched_count, (f'{qt["z_slice"]}/' if qt['z_slice'] else ''), test_run_slice_repr )
 			yield from self.q(q_sched.format(**qt))
 
@@ -652,7 +661,7 @@ class DTDtoGTFS:
 		# Raw sql rows are grouped by:
 		#  - train_uid (schedules) to apply overrides (stp=O/N/C) in the specified order.
 		#  - schedule_id (stops) to get clean "process one schedule at a time" loop.
-		self.log.debug('Processing {} cif.schedule entries...', sched_count)
+		self.log.debug('Processing {:,} cif.schedule entries...', sched_count)
 		progress = progress_iter(self.log, 'schedules', sched_count)
 
 		for train_uid, train_schedule_stops in it.groupby(schedule_rows, op.attrgetter('train_uid')):
@@ -777,13 +786,15 @@ class DTDtoGTFS:
 
 	def apply_associations(self, schedule_sets):
 		'''Iterate over Schedule entries,
-			applying cif.associations (joins/splits) to them where necessary.'''
+			applying cif.associations (splits/joins) to them where necessary.'''
 		assoc_map = self.get_assoc_map()
 		assoc_base, assoc_scheds = collections.defaultdict(list), collections.defaultdict(list)
 
-		### Buffer non-base Schedules that are used in associations
-		# Relevant slices of base schedules are also stored
+		# Buffering and two-step process is necessary
+		#  here to collect all base/assoc scheduls before applying association.
+		# Relevant slices of base schedules are stored
 		#  in assoc_base to splice their stops into assoc ones later.
+		self.log.debug('Processing schedules without associations...')
 		for ss in schedule_sets:
 			schedules, assoc_spans = ss.sched_list.copy(), list()
 			assocs_base, assocs = assoc_map[ss.train_uid]
@@ -799,7 +810,9 @@ class DTDtoGTFS:
 			for sched in schedules: sched.subtract_timespan(assoc_spans)
 			yield from filter(op.attrgetter('spans'), schedules)
 
-		### Process/flush buffered schedules after applying associations to them
+		self.log.debug(
+			'Applying {:,} association info(s) (splits/joins) to {:,} schedule(s)...',
+			len(assoc_scheds), sum(len(scheds) for scheds in assoc_scheds.values()) )
 		for assoc, scheds in assoc_scheds.items():
 			assoc_res = assoc.apply(assoc_base[assoc], scheds)
 			for quirk in assoc_res.quirks: self.stats[f'assoc-quirk-{quirk.name}'] += 1
