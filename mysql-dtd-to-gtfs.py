@@ -362,6 +362,9 @@ class Association:
 
 	def __eq__(self, assoc): return self._hash_tuple == assoc._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
+	def __repr__(self):
+		n, spans = ' N' if self.spans_assoc_offset else '', Timespan.merge_set(self.spans).span
+		return f'<A {self.base} {self.assoc} {spans}{n}>'
 
 	def subtract_timespan(self, span):
 		diff_types, self.spans = Timespan.difference_set(self.spans, span)
@@ -771,15 +774,7 @@ class DTDtoGTFS:
 						else: assoc2.subtract_timespan(assoc_span)
 					if a.stp_indicator == 'C': continue
 				if assoc.t and assoc not in trains_assoc: trains_assoc.add(assoc)
-			for assoc in trains_assoc:
-				# XXX: merge here is probably a bad idea, as assocs match w/ schedules
-				# merge = Timespan.merge_set(assoc.spans)
-				# if merge.t:
-				# 	for mt in merge.t:
-				# 		self.stats['assoc-merge-op'] += 1
-				# 		self.stats[f'assoc-merge-op-{mt.name}'] += 1
-				# 	self.stats['assoc-merge'] += 1
-				# 	assoc.spans = merge.span
+			for assoc in filter(op.attrgetter('spans'), trains_assoc):
 				for n, train_uid in enumerate([assoc.base, assoc.assoc]):
 					assoc_map[train_uid][n].append(assoc)
 		return assoc_map
@@ -798,6 +793,9 @@ class DTDtoGTFS:
 		for ss in schedule_sets:
 			schedules, assoc_spans = ss.sched_list.copy(), list()
 			assocs_base, assocs = assoc_map[ss.train_uid]
+			# train_uid can be either used as base_uid or assoc_uid,
+			#  but not both, as that'd need more complex assoc graph processing.
+			assert not (assocs_base and assocs), ss.train_uid
 			for assoc, sched in it.product(assocs_base, schedules):
 				overlaps, diffs = sched.partition(assoc.spans)
 				if overlaps: assoc_base[assoc].append(sched.copy(spans=overlaps))
