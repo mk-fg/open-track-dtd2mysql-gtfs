@@ -634,10 +634,12 @@ class DTDtoGTFS:
 		self.log.debug('Schedule counts: regular={}, z={}', *sched_counts)
 		yield sum(sched_counts)
 
+		test_run_slice_repr = ( str(test_run_slice)
+			if isinstance(test_run_slice, int) else f'[{len(test_run_slice)} train_uids]' )
 		for sched_count, qt in zip(sched_counts, q_tweaks):
 			self.log.debug(
-				'Fetching cif.{}schedule entries (count={}, test-train-limit={}/{})...',
-				qt['z'], sched_count, qt['z_slice'] or 'NA', test_run_slice )
+				'Fetching cif.{}schedule entries (count={}, test-train-limit={}{})...',
+				qt['z'], sched_count, (f'{qt["z_slice"]}/' if qt['z_slice'] else ''), test_run_slice_repr )
 			yield from self.q(q_sched.format(**qt))
 
 	def get_schedules(self, test_run_slice):
