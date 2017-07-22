@@ -127,11 +127,12 @@ GTFSRouteType = enum.IntEnum( 'RouteType',
 GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0)
 GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 
-TimespanMerge = collections.namedtuple('TSMerge', 't span')
-TimespanMergeType = enum.IntEnum( 'TSMergeType',
+
+TimespanMerge = collections.namedtuple('TSMerge', 'op span')
+TimespanMergeOp = enum.IntEnum( 'TSMergeOp',
 	'none same inc inc_diff_weekdays overlap bridge', start=0 )
-TimespanDiff = collections.namedtuple('TSDiff', 't spans')
-TimespanDiffType = enum.IntEnum('TSDiffType', 'none full split move exc', start=0)
+TimespanDiff = collections.namedtuple('TSDiff', 'op spans')
+TimespanDiffOp = enum.IntEnum('TSDiffOp', 'none full split move exc', start=0)
 
 class TimespanEmpty(Exception): pass
 
@@ -174,10 +175,6 @@ class Timespan:
 			self.weekdays, self.except_days, reverse=reverse )
 
 	@staticmethod
-	def date_iter_set(span_set):
-		return sorted(set(iter_chain(s.date_iter() for s in span_set)))
-
-	@staticmethod
 	def date_range(a, b, weekdays=None, except_days=None, reverse=False):
 		if a > b: return
 		if reverse: a, b = b, a
@@ -211,36 +208,19 @@ class Timespan:
 			if ( b == s2.end
 					and tuple(d1|d2 for d1,d2 in zip(s1.weekdays, s2.weekdays)) == s1.weekdays
 					and s1.except_days.issuperset(s2.except_days) ):
-				return TimespanMerge( TimespanMergeType.inc_diff_weekdays,
+				return TimespanMerge( TimespanMergeOp.inc_diff_weekdays,
 					Timespan(s1.start, s1.end, s1.weekdays, self.exc_days_overlap(s1, s2, a, b)) )
 		else:
-			if s1 == s2: return TimespanMerge(TimespanMergeType.same, s1)
+			if s1 == s2: return TimespanMerge(TimespanMergeOp.same, s1)
 			if a and b: # overlap
-				return TimespanMerge(TimespanMergeType.overlap, Timespan(
+				return TimespanMerge(TimespanMergeOp.overlap, Timespan(
 					s1.start, max(s1.end, s2.end), weekdays, self.exc_days_overlap(s1, s2, a, b) ))
 			if len(list(self.date_range(s1.end, s2.start, weekdays))) <= exc_days_to_split: # bridge
-				return TimespanMerge(TimespanMergeType.bridge, Timespan(
+				return TimespanMerge(TimespanMergeOp.bridge, Timespan(
 					s1.start, max(s1.end, s2.end), weekdays,
 					set( s1.except_days | s2.except_days |
 						set(self.date_range(s1.end + one_day, s2.start - one_day, weekdays)) ) ))
-		return TimespanMerge(TimespanMergeType.none, None)
-
-	@classmethod
-	def merge_set(cls, spans):
-		if len(spans) <= 1: return TimespanMerge(list(), spans)
-		span_set, merge_ops = set(spans), list()
-		while True:
-			span_merge_count = len(span_set)
-			for s1, s2 in list(it.combinations(span_set, 2)):
-				if not span_set.issuperset([s1, s2]): continue
-				merge = s1.merge(s2)
-				if merge.t:
-					span_set.difference_update([s1, s2])
-					span_set.add(merge.span)
-					merge_ops.append(merge.t)
-			if len(span_set) == span_merge_count: break
-		if len(span_set) == len(spans): return TimespanMerge(list(), spans)
-		return TimespanMerge(merge_ops, list(span_set))
+		return TimespanMerge(TimespanMergeOp.none, None)
 
 	def _difference_range(self, span, exc_days_to_split=10):
 		'''Try to subtract overlap range from timespan,
@@ -248,23 +228,23 @@ class Timespan:
 			Returns either TimespanDiff or None if it cannot be done this way.'''
 		if tuple(d1|d2 for d1,d2 in zip(self.weekdays, span.weekdays)) != span.weekdays: return
 		s1, s2, a, b = self.date_overlap(self, span)
-		if not (a and b): return TimespanDiff(TimespanDiffType.none, [self])
+		if not (a and b): return TimespanDiff(TimespanDiffOp.none, [self])
 		svc_days = set(self.date_range(a, b, self.weekdays, self.except_days))
 		if span.except_days.issuperset(svc_days): # all service days are exceptions in overlay
-			return TimespanDiff(TimespanDiffType.none, [self])
+			return TimespanDiff(TimespanDiffOp.none, [self])
 		if svc_days.intersection(span.except_days): return # XXX: need "added" exceptions here
 		start, end = self.start, self.end
-		if a == start and b == end: return TimespanDiff(TimespanDiffType.full, [])
+		if a == start and b == end: return TimespanDiff(TimespanDiffOp.full, [])
 		if a != start and b != end: # split in two, unless only few exc_days required to bridge
 			if len(svc_days.difference(span.except_days)) >= exc_days_to_split:
-				return TimespanDiff(TimespanDiffType.split, [
+				return TimespanDiff(TimespanDiffOp.split, [
 					Timespan(start, span.start - one_day, self.weekdays, self.except_days),
 					Timespan(span.end + one_day, end, self.weekdays, self.except_days) ])
 			return
 		# Remaining case is (a == start or b == end) - move start/end accordingly
 		if a == start: start = b + one_day
 		else: end = a - one_day
-		return TimespanDiff( TimespanDiffType.move,
+		return TimespanDiff( TimespanDiffOp.move,
 			[Timespan(start, end, self.weekdays, self.except_days)] )
 
 	def difference(self, span):
@@ -278,24 +258,13 @@ class Timespan:
 		try:
 			span_diff = Timespan( self.start, self.end,
 				self.weekdays, self.except_days | frozenset(span.date_iter()) )
-		except TimespanEmpty: return TimespanDiff(TimespanDiffType.full, [])
-		if span_diff == self: return TimespanDiff(TimespanDiffType.none, [self])
-		return TimespanDiff(TimespanDiffType.exc, [span_diff])
-
-	@classmethod
-	def difference_set(cls, spans1, spans2):
-		if isinstance(spans2, cls): spans2 = [spans2]
-		diff_types = list()
-		for span in spans2:
-			diffs = list(s.difference(span) for s in spans1)
-			diffs_ext = list(map(op.attrgetter('t'), diffs))
-			if any(diffs_ext):
-				spans1 = list_chain(map(op.attrgetter('spans'), diffs))
-				diff_types.extend(filter(None, diffs_ext))
-		return TimespanDiff(diff_types, spans1)
+		except TimespanEmpty: return TimespanDiff(TimespanDiffOp.full, [])
+		if span_diff == self: return TimespanDiff(TimespanDiffOp.none, [self])
+		return TimespanDiff(TimespanDiffOp.exc, [span_diff])
 
 	def intersection(self, span):
 		'Returns None or single span corresponding to intersection.'
+		# XXX: should probably return/log ops as well
 		s1, s2, a, b = self.date_overlap(self, span)
 		if not (a and b): return
 		try:
@@ -304,26 +273,83 @@ class Timespan:
 				s1.except_days | s2.except_days )
 		except TimespanEmpty: return # due to weekdays/exceptions
 
-	@classmethod
-	def intersection_set(cls, spans1, spans2):
-		return list(filter( None,
-			(s1.intersection(s2) for s1,s2 in it.product(spans1, spans2)) ))
+
+CalMerge = collections.namedtuple('CalMerge', 'ops cal')
+CalDiff = collections.namedtuple('CalDiff', 'ops cal')
+
+class Calendar:
 
 	@classmethod
-	def shift_set(cls, spans, offset):
-		if not spans or offset == 0: return spans
+	def re(cls, spans):
+		'Return or instantiate new Calendar from spans.'
+		if isinstance(spans, cls): return spans
+		return cls(spans)
+
+	def __init__(self, spans=None):
+		if isinstance(spans, Timespan): spans = [spans]
+		self.spans = list(spans or list())
+
+	def __bool__(self): return bool(self.spans)
+	def __hash__(self): return hash(frozenset(self.spans))
+	def __repr__(self): return f'<Cal[ {self.compressed().cal.spans} ]>'
+
+	def date_iter(self):
+		return sorted(set(iter_chain(s.date_iter() for s in self.spans)))
+
+	def compressed(self):
+		if len(self.spans) <= 1: return CalMerge(list(), self)
+		span_set, merge_ops = set(self.spans), list()
+		while True:
+			span_merge_count = len(span_set)
+			for s1, s2 in list(it.combinations(span_set, 2)):
+				if not span_set.issuperset([s1, s2]): continue
+				merge = s1.merge(s2)
+				if merge.op:
+					span_set.difference_update([s1, s2])
+					span_set.add(merge.span)
+					merge_ops.append(merge.op)
+			if len(span_set) == span_merge_count: break
+		if len(span_set) == len(self.spans):
+			return CalMerge(list(), Calendar(self.spans))
+		return CalMerge(merge_ops, Calendar(span_set))
+
+	def difference(self, cal):
+		spans, diff_ops = self.spans, list()
+		for span in Calendar.re(cal).spans:
+			diffs = list(s.difference(span) for s in spans)
+			diffs_ext = list(diff.op for diff in diffs if diff.op)
+			if diffs_ext:
+				spans = list_chain(map(op.attrgetter('spans'), diffs))
+				diff_ops.extend(diffs_ext)
+		return CalDiff(diff_ops, Calendar(spans))
+
+	def intersection(self, cal):
+		# XXX: should probably return/log ops as well
+		return Calendar(filter( None,
+			(s1.intersection(s2) for s1,s2 in it.product(self.spans, cal.spans)) ))
+
+	def shift(self, offset):
+		if not self.spans or offset == 0: return self
 		offset_days = offset * one_day
-		return list(Timespan(
-			span.start + offset_days, span.end + offset_days,
-			tuple(span.weekdays[(n-offset)%7] for n in range(7)),
-			set(day + offset_days for day in span.except_days) ) for span in spans)
+		return Calendar((Timespan(
+			s.start + offset_days, s.end + offset_days,
+			tuple(s.weekdays[(n-offset)%7] for n in range(7)),
+			set(day + offset_days for day in s.except_days) ) for s in self.spans))
 
-	@classmethod
-	def partition(cls, spans1, spans2):
-		'Return timespans for intersection and difference from specified set of spans.'
-		diffs = cls.difference_set(spans1, spans2)
-		overlaps = cls.intersection_set(spans1, spans2)
-		return overlaps, diffs.spans
+	def partition(self, cal):
+		'Return calendars for intersection and difference from specified cal.'
+		return self.intersection(cal), self.difference(cal).cal
+
+	def union(self, *cals):
+		return Calendar(set(self.spans).union(iter_chain(Calendar.re(cal).spans for cal in cals)))
+
+	def extend(self, *cals):
+		self.spans = self.union(*cals).spans
+
+	def subtract(self, cal):
+		ops, cal_diff = self.difference(cal)
+		self.spans = cal_diff.spans
+		return ops
 
 
 ScheduleStop = collections.namedtuple('SchedStop', 'id ts_arr ts_dep')
@@ -331,22 +357,24 @@ ScheduleSet = collections.namedtuple('SchedSet', 'train_uid sched_list')
 
 class Schedule:
 
-	def __init__(self, train_uid, stops, spans, **meta):
-		self.train_uid, self.stops, self.spans, self.meta = train_uid, tuple(stops), spans, meta
+	def __init__(self, train_uid, stops, cal, **meta):
+		self.train_uid, self.stops = train_uid, tuple(stops)
+		self.cal, self.meta = Calendar.re(cal), meta
 		self._hash_tuple = self.train_uid, self.stops
 
+	def __bool__(self): return bool(self.cal)
 	def __eq__(self, s): return self._hash_tuple == s._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
 
+	def __repr__(self):
+		stops = ' '.join(str(s.id) for s in self.stops)
+		return f'<S {self.train_uid} [{stops}] {self.cal}>'
+
 	def copy(self, **updates):
 		state = self.meta.copy()
-		state.update((k, getattr(self, k)) for k in 'train_uid stops spans'.split())
+		state.update((k, getattr(self, k)) for k in 'train_uid stops cal'.split())
 		state.update(updates)
 		return Schedule(**state)
-
-	def subtract_timespan(self, span):
-		diff_types, self.spans = Timespan.difference_set(self.spans, span)
-		return diff_types
 
 
 AssocType = enum.IntEnum('AssocType', 'split join')
@@ -355,21 +383,18 @@ AssocApply = collections.namedtuple('AssocApply', 'quirks scheds')
 
 class Association:
 
-	def __init__(self, base, assoc, t, stop, assoc_next_day, spans):
-		self.base, self.assoc, self.t, self.stop, self.spans = base, assoc, t, stop, spans
-		self.spans_assoc_offset = int(bool(assoc_next_day))
-		self.spans_assoc = Timespan.shift_set(self.spans, self.spans_assoc_offset)
-		self._hash_tuple = self.base, self.assoc, self.stop
+	def __init__(self, base, assoc, t, stop, assoc_next_day, cal):
+		self.base, self.assoc, self.t, self.stop, self.cal = base, assoc, t, stop, Calendar.re(cal)
+		self.cal_assoc_offset = int(bool(assoc_next_day))
+		self.cal_assoc = self.cal.shift(self.cal_assoc_offset)
+		self._hash_tuple = self.base, self.assoc, self.stop # calendar is mutable
 
+	def __bool__(self): return bool(self.cal)
 	def __eq__(self, assoc): return self._hash_tuple == assoc._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
 	def __repr__(self):
-		n, spans = ' N' if self.spans_assoc_offset else '', Timespan.merge_set(self.spans).span
-		return f'<A {self.base} {self.assoc} {self.t.name} {self.stop} {spans}{n}>'
-
-	def subtract_timespan(self, span):
-		diff_types, self.spans = Timespan.difference_set(self.spans, span)
-		return diff_types
+		n = ' N' if self.cal_assoc_offset else ''
+		return f'<A {self.base} {self.assoc} {self.t.name} {self.stop} {self.cal}{n}>'
 
 	def apply(self, scheds_base, scheds_assoc):
 		'''Return new list of Schedules with this Association applied to scheds_assoc,
@@ -383,14 +408,14 @@ class Association:
 			quirks.append(AssocQuirk.no_base)
 			scheds_base = [None]
 		for sched in scheds_assoc:
-			sched_spans_orig = list() # spans with no overlap with any sched_base
+			sched_cal_orig = Calendar() # cal with no overlap with any sched_base
 			for sched_base in scheds_base:
 				if sched_base:
-					spans, diffs = Timespan.partition(sched.spans, sched_base.spans)
-					if not spans: continue
-					sched_spans_orig = Timespan.difference_set(sched_spans_orig, spans).spans
-					if diffs: sched_spans_orig.extend(diffs)
-				else: spans = sched.spans
+					cal, cal_diff = sched.cal.partition(sched_base.cal)
+					if not cal: continue
+					sched_cal_orig.subtract(cal)
+					if cal_diff: sched_cal_orig.extend(cal_diff)
+				else: cal = sched.cal
 				head, tail = sched_base.stops if sched_base else list(), sched.stops
 				if self.t == AssocType.split: head, tail = tail, head
 				stop_check = lambda s,chk_id=self.stop: s.id != chk_id
@@ -400,11 +425,10 @@ class Association:
 					quirks.append(AssocQuirk.no_stop)
 					continue
 				sched_res.append(sched.copy(
-					stops=stops, spans=spans,
-					train_uid=f'{self.assoc}_{self.base}' ))
-			if sched_spans_orig:
+					stops=stops, cal=cal, train_uid=f'{self.assoc}_{self.base}' ))
+			if sched_cal_orig:
 				quirks.append(AssocQuirk.orig_days)
-				sched_res.append(sched.copy(spans=sched_spans_orig))
+				sched_res.append(sched.copy(cal=sched_cal_orig))
 		return AssocApply(quirks, sched_res)
 
 
@@ -522,17 +546,17 @@ class DTDtoGTFS:
 		#  - populate gtfs.calendar/gtfs.calendar_dates, cloning trips/stops where necessary
 		#
 		# So essentially converting many-to-many relation into many-to-one
-		#  with redundant trips, using trip_svc_timespans as a temporary mtm index.
+		#  with redundant trips, using trip_calendars as a temporary mtm index.
 
 		## Step-1: Populate gtfs.trips and gtfs.stop_times for cif.schedules,
-		##  building mapping of service timespans for each trip_id.
+		##  building mapping of service timespans (calendars) for each trip_id.
 		schedule_set_iter = self.get_schedules(test_run_slice)
 		schedule_iter = self.apply_associations(schedule_set_iter)
-		trip_svc_timespans = self.schedules_to_trips(schedule_iter)
+		trip_calendars = self.schedules_to_trips(schedule_iter)
 
-		## Step-2: Merge/optimize timespans in trip_svc_timespans
-		##  and create gtfs.calendar entries, converting these timespans to service_id values.
-		trip_svc_ids = self.create_service_timespans(trip_svc_timespans)
+		## Step-2: Merge/optimize timespans in trip_calendars
+		##  and create gtfs.calendar entries, converting these calendars to service_id values.
+		trip_svc_ids = self.create_service_calendars(trip_calendars)
 
 		## Step-3: Store assigned service_id to gtfs.trips,
 		##  duplicating trip where there's >1 service_id associated with it.
@@ -696,10 +720,10 @@ class DTDtoGTFS:
 
 				if s.stp_indicator in 'ONC':
 					for schedule in train_schedules:
-						diff_types = schedule.subtract_timespan(svc_span)
-						for dt in filter(None, diff_types):
+						ops = schedule.cal.subtract(svc_span)
+						for do in filter(None, ops):
 							self.stats[f'svc-diff-op'] += 1
-							self.stats[f'svc-diff-{dt.name}'] += 1
+							self.stats[f'svc-diff-{do.name}'] += 1
 					if s.stp_indicator == 'C': continue # no associated stops, unlike stp=O/N
 
 				### Processing for schedule stops
@@ -771,11 +795,11 @@ class DTDtoGTFS:
 				if a.stp_indicator in 'ONC':
 					for assoc2 in trains_assoc:
 						if assoc2 == assoc and a.stp_indicator != 'C':
-							assoc2.spans.append(assoc_span)
-						else: assoc2.subtract_timespan(assoc_span)
+							assoc2.cal.extend(assoc_span)
+						else: assoc2.cal.subtract(assoc_span)
 					if a.stp_indicator == 'C': continue
 				if assoc.t and assoc not in trains_assoc: trains_assoc.add(assoc)
-			for assoc in filter(op.attrgetter('spans'), trains_assoc):
+			for assoc in filter(None, trains_assoc):
 				for n, train_uid in enumerate([assoc.base, assoc.assoc]):
 					assoc_map[train_uid][n].append(assoc)
 		return assoc_map
@@ -796,32 +820,36 @@ class DTDtoGTFS:
 			assert not (assocs_base and assocs), ss.train_uid
 			if assocs_base:
 				for assoc, sched in it.product(assocs_base, ss.sched_list):
-					assoc_spans = Timespan.intersection_set(sched.spans, assoc.spans)
-					if assoc_spans: sched_idx_base[assoc].append(sched.copy(spans=assoc_spans))
+					assoc_cal = assoc.cal.intersection(sched.cal)
+					if assoc_cal: sched_idx_base[assoc].append(sched.copy(cal=assoc_cal))
 				yield from ss.sched_list # base schedules don't change at all
 				continue
-			train_assoc_spans, train_assoc_days = list(), set()
+			train_assoc_cal, train_assoc_days = Calendar(), set()
 			for assoc in assocs:
 				# Sanity check: allow only one assoc per any given date for same train
-				assoc_days = list_chain(s.date_iter() for s in assoc.spans)
+				assoc_days = list(assoc.cal.date_iter())
 				assoc_days_multibase = train_assoc_days.intersection(assoc_days)
 				if assoc_days_multibase:
 					assoc_quirk.append((assocs, assoc_days_multibase))
 				for sched in ss.sched_list:
 					train_assoc_days.update(assoc_days)
-					assoc_spans = Timespan.intersection_set(sched.spans, assoc.spans_assoc)
-					if not assoc_spans: continue
-					train_assoc_spans.extend(assoc_spans)
+					assoc_cal = assoc.cal_assoc.intersection(sched.cal)
+					if not assoc_cal: continue
+					train_assoc_cal.extend(assoc_cal)
 					sched_idx_assoc[assoc].append(sched.copy(
-						spans=Timespan.shift_set(assoc_spans, -assoc.spans_assoc_offset) ))
+						cal=assoc_cal.shift(-assoc.cal_assoc_offset) ))
 			for sched in ss.sched_list:
-				sched.subtract_timespan(train_assoc_spans)
-				if sched.spans: yield sched # schedules for days outside of associations
+				sched.cal.subtract(train_assoc_cal)
+				if sched: yield sched # schedules for days outside of associations
 
 		# Only allow days with multiple base_uids when there's no schedules for them
 		# Example: P72173 that splits from P73879 and P74118 on same days
 		for assocs, assoc_days in assoc_quirk:
-			assert not sched_idx_base[assoc], [assocs, assoc_days]
+			scheds_base = list_chain(sched_idx_base[assoc] for assoc in assocs)
+			if not scheds_base: continue
+			raise CIFError(
+				'Multiple associations for same train_uid on the same days',
+				assocs[0].assoc, assocs, list(map(str, assoc_days)), scheds_base )
 
 		self.log.debug(
 			'Applying {:,} association info(s) (splits/joins) to {:,} schedule(s)...',
@@ -834,10 +862,10 @@ class DTDtoGTFS:
 
 	def schedules_to_trips(self, schedules):
 		'''Process Schedule entries, populating gtfs.trips and gtfs.stop_times.
-			Returns "trip_svc_timespans" index of {trip_id: timespans},
+			Returns "trip_calendars" index of {trip_id: Calendar},
 				to populate gtfs.calendar and gtfs.calendar_dates tables after some merging.
 			As gtfs.calendar is still empty, all created trips don't have valid service_id value set.'''
-		trip_svc_timespans = collections.defaultdict(list) # {trip_id: timespans}
+		trip_calendars = collections.defaultdict(Calendar) # {trip_id: Calendar}
 
 		# Only one gtfs.trip_id is created for
 		#  same trip_hash (train_uid+stops+stop_times) via trip_merge_idx.
@@ -855,7 +883,7 @@ class DTDtoGTFS:
 				if s in trip_merge_idx:
 					self.stats['trip-dedup'] += 1
 					trip_id = trip_merge_idx[s]
-					trip_svc_timespans[trip_id].extend(s.spans)
+					trip_calendars[trip_id].extend(s.cal)
 
 				else:
 					trip_id = trip_merge_idx[s] = len(trip_merge_idx) + 1
@@ -874,13 +902,13 @@ class DTDtoGTFS:
 							trip_id=trip_id, pickup_type=int(GTFSPickupType.regular),
 							arrival_time=st.ts_arr, departure_time=st.ts_dep,
 							stop_id=st.id, stop_sequence=n )
-					trip_svc_timespans[trip_id].extend(s.spans)
+					trip_calendars[trip_id].extend(s.cal)
 
-		self.stats['trip-count'] = len(trip_svc_timespans)
-		return trip_svc_timespans
+		self.stats['trip-count'] = len(trip_calendars)
+		return trip_calendars
 
 
-	def create_service_timespans(self, trip_svc_timespans):
+	def create_service_calendars(self, trip_calendars):
 		'''Merge/optimize timespans for trips and create gtfs.calendar entries.
 			Returns trip_svc_ids mapping for {trip_id: svc_id_list}.'''
 
@@ -888,20 +916,16 @@ class DTDtoGTFS:
 		svc_merge_idx = dict() # {svc_span: svc_id} - to deduplicate svc_id for diff trips
 		trip_svc_ids = dict() # {trip_id: svc_id_list}
 
-		self.log.debug('Merging service timespans for {} gtfs.trips...', len(trip_svc_timespans))
-		for trip_id, spans in trip_svc_timespans.items():
-			spans = trip_svc_ids[trip_id] = spans.copy()
+		self.log.debug('Merging service calendars for {} gtfs.trips...', len(trip_calendars))
+		for trip_id, cal in trip_calendars.items():
 
-			### Merge timespans where possible
-			merge = Timespan.merge_set(spans)
-			if merge.t:
-				for mt in merge.t:
-					self.stats['svc-merge-op'] += 1
-					self.stats[f'svc-merge-op-{mt.name}'] += 1
-				self.stats['svc-merge'] += 1
-				spans = trip_svc_ids[trip_id] = merge.span
+			merge_ops, cal = cal.compressed()
+			for mo in merge_ops:
+				self.stats['svc-merge-op'] += 1
+				self.stats[f'svc-merge-op-{mo.name}'] += 1
+			self.stats['svc-merge'] += bool(merge_ops)
 
-			### Store into gtfs.calendar/gtfs.calendar_dates, assigning service_id to each
+			spans = trip_svc_ids[trip_id] = cal.spans
 			for n, span in enumerate(spans):
 				if span in svc_merge_idx: # reuse service_id for same exact span from diff trip
 					self.stats['svc-dedup'] += 1
