@@ -122,6 +122,10 @@ def dts_format(dts, sec=False):
 	if dts_days: dts = '{}+{}'.format(dts_days, dts)
 	return dts
 
+def dts_25h(dts):
+	if isinstance(dts, datetime.timedelta): dts = dts.total_seconds()
+	return f'{dts // 3600:02.0f}:{(dts % 3600) // 60:02.0f}:{dts % 60:02.0f}'
+
 GTFSRouteType = enum.IntEnum( 'RouteType',
 	'light_rail subway rail bus ferry cable_car gondola funicular spacecraft', start=0 )
 GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0)
@@ -352,7 +356,7 @@ class Calendar:
 		return ops
 
 
-ScheduleStop = collections.namedtuple('SchedStop', 'id ts_arr ts_dep')
+ScheduleStop = collections.namedtuple('SchedStop', 'id ts_arr ts_dep pickup')
 ScheduleSet = collections.namedtuple('SchedSet', 'train_uid sched_list')
 
 class Schedule:
@@ -360,6 +364,7 @@ class Schedule:
 	def __init__(self, train_uid, stops, cal, **meta):
 		self.train_uid, self.stops = train_uid, tuple(stops)
 		self.cal, self.meta = Calendar.re(cal), meta
+		meta.update(trip_headsign=train_uid)
 		self._hash_tuple = self.train_uid, self.stops
 
 	def __bool__(self): return bool(self.cal)
@@ -416,16 +421,19 @@ class Association:
 					sched_cal_orig.subtract(cal)
 					if cal_diff: sched_cal_orig.extend(cal_diff)
 				else: cal = sched.cal
-				head, tail = sched_base.stops if sched_base else list(), sched.stops
-				if self.t == AssocType.split: head, tail = tail, head
+				head, tail = sched.stops, sched_base.stops if sched_base else list()
+				if self.t == AssocType.join:
+					train_uid = f'{self.assoc}_{self.base}'
+				if self.t == AssocType.split:
+					train_uid = f'{self.base}_{self.assoc}'
+					head, tail = tail, head
 				stop_check = lambda s,chk_id=self.stop: s.id != chk_id
 				stops = list(it.chain(
 					it.takewhile(stop_check, head), it.dropwhile(stop_check, tail) ))
 				if len(stops) < 2:
 					quirks.append(AssocQuirk.no_stop)
 					continue
-				sched_res.append(sched.copy(
-					stops=stops, cal=cal, train_uid=f'{self.assoc}_{self.base}' ))
+				sched_res.append(sched.copy(stops=stops, cal=cal, train_uid=train_uid))
 			if sched_cal_orig:
 				quirks.append(AssocQuirk.orig_days)
 				sched_res.append(sched.copy(cal=sched_cal_orig))
@@ -742,6 +750,9 @@ class DTDtoGTFS:
 					for st in stops )))
 				for st in stops:
 					ts_arr, ts_dep = st.public_arrival_time, st.public_departure_time
+					pickup_type = GTFSPickupType.regular if ts_arr or ts_dep else GTFSPickupType.none
+					ts_arr = ts_arr or st.scheduled_arrival_time
+					ts_dep = ts_dep or st.scheduled_departure_time
 					# XXX: check if origin has some arrival time indication in CIF data
 					ts_arr, ts_dep = ts_arr or ts_dep, ts_dep or ts_arr # origin/termination stops
 
@@ -751,10 +762,10 @@ class DTDtoGTFS:
 						if ts_dep < ts_arr: ts_dep += one_day
 						ts_prev = ts_dep
 
-					sched_stops.append(ScheduleStop(st.crs_code, ts_arr, ts_dep))
+					sched_stops.append(ScheduleStop(st.crs_code, ts_arr, ts_dep, pickup_type))
 
-				sched = Schedule( s.train_uid, sched_stops, [svc_span],
-					trip_short_name=s.retail_train_id, trip_headsign=s.train_uid )
+				sched = Schedule(
+					s.train_uid, sched_stops, [svc_span], trip_short_name=s.retail_train_id )
 				train_schedules.append(sched)
 
 			yield ScheduleSet(train_uid, train_schedules)
@@ -899,9 +910,9 @@ class DTDtoGTFS:
 					for n, st in enumerate(s.stops, 1):
 						if not (st.ts_arr and st.ts_dep): continue # non-public stop
 						self.insert( 'gtfs.stop_times',
-							trip_id=trip_id, pickup_type=int(GTFSPickupType.regular),
-							arrival_time=st.ts_arr, departure_time=st.ts_dep,
-							stop_id=st.id, stop_sequence=n )
+							trip_id=trip_id, pickup_type=int(st.pickup),
+							stop_id=st.id, stop_sequence=n,
+							arrival_time=dts_25h(st.ts_arr), departure_time=dts_25h(st.ts_dep) )
 					trip_calendars[trip_id].extend(s.cal)
 
 		self.stats['trip-count'] = len(trip_calendars)
