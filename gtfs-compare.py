@@ -413,19 +413,20 @@ class GTFSDB:
 				if cif_db:
 					print('cif schedules/stops (for reference):')
 					for s in self.q(f'''
-							SELECT
-								s.id, stp_indicator AS stp,
-								runs_from AS a , runs_to AS b, bank_holiday_running AS always,
-								CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
-								crs_code, public_arrival_time AS ts_arr, public_departure_time AS ts_dep
-							FROM {cif_db}.schedule s
-							LEFT JOIN {cif_db}.stop_time st ON st.schedule = s.id
-							LEFT JOIN {cif_db}.tiploc t ON t.tiploc_code = st.location
-							WHERE train_uid = %s AND (st.id IS NULL OR t.crs_code IS NOT NULL)
-							ORDER BY FIELD(stp_indicator,'P','N','O','C'), s.id, st.id''', train_uid):
+								SELECT
+									s.train_uid, s.id, stp_indicator AS stp,
+									runs_from AS a , runs_to AS b, bank_holiday_running AS always,
+									CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
+									crs_code, public_arrival_time AS ts_arr, public_departure_time AS ts_dep
+								FROM {cif_db}.schedule s
+								LEFT JOIN {cif_db}.stop_time st ON st.schedule = s.id
+								LEFT JOIN {cif_db}.tiploc t ON t.tiploc_code = st.location
+								WHERE train_uid IN ({{}}) AND (st.id IS NULL OR t.crs_code IS NOT NULL)
+								ORDER BY FIELD(stp_indicator,'P','N','O','C'), s.id, st.id'''\
+							.format(','.join(map(self.escape, train_uid.split('_')))) ):
 						days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
 						print(
-							f'  {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
+							f'  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
 							'A' if s.always else ' ', s.crs_code or '---',
 							dts_format(s.ts_arr), dts_format(s.ts_dep) )
 

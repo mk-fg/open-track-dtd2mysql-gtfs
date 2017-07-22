@@ -77,6 +77,12 @@ def iter_range(a, b, step):
 		if v == b: break
 		v += step
 
+def get_index(func, seq):
+	for n, v in enumerate(seq):
+		if func(v): break
+	else: raise IndexError
+	return n
+
 iter_chain = it.chain.from_iterable
 list_chain = lambda v: list(iter_chain(v))
 
@@ -122,13 +128,9 @@ def dts_format(dts, sec=False):
 	if dts_days: dts = '{}+{}'.format(dts_days, dts)
 	return dts
 
-def dts_25h(dts):
-	if isinstance(dts, datetime.timedelta): dts = dts.total_seconds()
-	return f'{dts // 3600:02.0f}:{(dts % 3600) // 60:02.0f}:{dts % 60:02.0f}'
-
 GTFSRouteType = enum.IntEnum( 'RouteType',
 	'light_rail subway rail bus ferry cable_car gondola funicular spacecraft', start=0 )
-GTFSPickupType = enum.IntEnum('PickupType', 'regular none phone driver', start=0)
+GTFSEmbarkType = enum.IntEnum('EmbarkType', 'regular none phone driver', start=0)
 GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 
 
@@ -356,14 +358,14 @@ class Calendar:
 		return ops
 
 
-ScheduleStop = collections.namedtuple('SchedStop', 'id ts_arr ts_dep pickup')
+ScheduleStop = collections.namedtuple('SchedStop', 'id ts_arr ts_dep pickup dropoff')
 ScheduleSet = collections.namedtuple('SchedSet', 'train_uid sched_list')
 
 class Schedule:
 
 	def __init__(self, train_uid, stops, cal, **meta):
-		self.train_uid, self.stops = train_uid, tuple(stops)
-		self.cal, self.meta = Calendar.re(cal), meta
+		self.train_uid, self.cal, self.meta = train_uid, Calendar.re(cal), meta
+		self.stops = tuple(self.rollover_stop_times(stops))
 		meta.update(trip_headsign=train_uid)
 		self._hash_tuple = self.train_uid, self.stops
 
@@ -380,6 +382,18 @@ class Schedule:
 		state.update((k, getattr(self, k)) for k in 'train_uid stops cal'.split())
 		state.update(updates)
 		return Schedule(**state)
+
+	def rollover_stop_times(self, stops):
+		ts_prev = None
+		for st in stops:
+			if st.ts_arr and st.ts_dep:
+				ts_arr, ts_dep = ts_tuple = st.ts_arr, st.ts_dep
+				if not ts_prev: ts_prev = ts_dep
+				elif ts_prev > ts_arr: ts_arr += one_day
+				if ts_dep < ts_arr: ts_dep += one_day
+				if (ts_arr, ts_dep) != ts_tuple:
+					st = st._replace(ts_arr=ts_arr, ts_dep=ts_dep)
+			yield st
 
 
 AssocType = enum.IntEnum('AssocType', 'split join')
@@ -401,6 +415,9 @@ class Association:
 		n = ' N' if self.cal_assoc_offset else ''
 		return f'<A {self.base} {self.assoc} {self.t.name} {self.stop} {self.cal}{n}>'
 
+	def assoc_stop(self, st1, st2):
+		return st1._replace(ts_dep=st2.ts_dep, pickup=st2.pickup)
+
 	def apply(self, scheds_base, scheds_assoc):
 		'''Return new list of Schedules with this Association applied to scheds_assoc,
 			using scheds_base (can be empty) as a base train Schedules for assoc timespan(s).'''
@@ -409,6 +426,7 @@ class Association:
 		# Any days missing in sched_base are assumed
 		#  to have original schedule with no association applied.
 		quirks, sched_res = list(), list()
+		get_stop_idx = ft.partial(get_index, lambda s,chk_id=self.stop: s.id == chk_id)
 		if not scheds_base:
 			quirks.append(AssocQuirk.no_base)
 			scheds_base = [None]
@@ -427,10 +445,12 @@ class Association:
 				if self.t == AssocType.split:
 					train_uid = f'{self.base}_{self.assoc}'
 					head, tail = tail, head
-				stop_check = lambda s,chk_id=self.stop: s.id != chk_id
-				stops = list(it.chain(
-					it.takewhile(stop_check, head), it.dropwhile(stop_check, tail) ))
-				if len(stops) < 2:
+				try:
+					n, m = map(get_stop_idx, [head, tail])
+					stops = list(it.chain( head[:n],
+						[self.assoc_stop(head[n], tail[m])], tail[m+1:] ))
+					if len(stops) < 2: raise IndexError
+				except IndexError:
 					quirks.append(AssocQuirk.no_stop)
 					continue
 				sched_res.append(sched.copy(stops=stops, cal=cal, train_uid=train_uid))
@@ -750,7 +770,8 @@ class DTDtoGTFS:
 					for st in stops )))
 				for st in stops:
 					ts_arr, ts_dep = st.public_arrival_time, st.public_departure_time
-					pickup_type = GTFSPickupType.regular if ts_arr or ts_dep else GTFSPickupType.none
+					pickup_type = GTFSEmbarkType.regular if ts_dep else GTFSEmbarkType.none
+					drop_off_type = GTFSEmbarkType.regular if ts_arr else GTFSEmbarkType.none
 					ts_arr = ts_arr or st.scheduled_arrival_time
 					ts_dep = ts_dep or st.scheduled_departure_time
 					# XXX: check if origin has some arrival time indication in CIF data
@@ -762,7 +783,8 @@ class DTDtoGTFS:
 						if ts_dep < ts_arr: ts_dep += one_day
 						ts_prev = ts_dep
 
-					sched_stops.append(ScheduleStop(st.crs_code, ts_arr, ts_dep, pickup_type))
+					sched_stops.append(ScheduleStop(
+						st.crs_code, ts_arr, ts_dep, pickup_type, drop_off_type ))
 
 				sched = Schedule(
 					s.train_uid, sched_stops, [svc_span], trip_short_name=s.retail_train_id )
@@ -910,9 +932,9 @@ class DTDtoGTFS:
 					for n, st in enumerate(s.stops, 1):
 						if not (st.ts_arr and st.ts_dep): continue # non-public stop
 						self.insert( 'gtfs.stop_times',
-							trip_id=trip_id, pickup_type=int(st.pickup),
-							stop_id=st.id, stop_sequence=n,
-							arrival_time=dts_25h(st.ts_arr), departure_time=dts_25h(st.ts_dep) )
+							trip_id=trip_id, stop_id=st.id, stop_sequence=n,
+							pickup_type=int(st.pickup), drop_off_type=int(st.dropoff),
+							arrival_time=st.ts_arr, departure_time=st.ts_dep )
 					trip_calendars[trip_id].extend(s.cal)
 
 		self.stats['trip-count'] = len(trip_calendars)
