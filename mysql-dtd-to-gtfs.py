@@ -1064,13 +1064,15 @@ def main(args=None):
 	group.add_argument('-g', '--mycnf-group', metavar='group',
 		help='Name of "[group]" (ini section) in ~/.my.cnf ini file to use parameters from.')
 
-	group = parser.add_argument_group('Extra data sources')
-	group.add_argument('-e', '--uk-bank-holiday-list',
-		metavar='file', default='doc/UK-bank-holidays.csv',
-		help='List of dates, one per line, for UK bank holidays. Default: %(default)s')
-	group.add_argument('--uk-bank-holiday-fmt',
-		metavar='strptime-format', default='%d-%b-%Y',
-		help='strptime() format for each line in -e/--uk-bank-holiday-list file. Default: %(default)s')
+	### Temporarily disabled, as these have to be handled differently -
+	###  - i.e. applied to schedules after processing of associations, not before.
+	# group = parser.add_argument_group('Extra data sources')
+	# group.add_argument('-e', '--uk-bank-holiday-list',
+	# 	metavar='file', default='doc/UK-bank-holidays.csv',
+	# 	help='List of dates, one per line, for UK bank holidays. Default: %(default)s')
+	# group.add_argument('--uk-bank-holiday-fmt',
+	# 	metavar='strptime-format', default='%d-%b-%Y',
+	# 	help='strptime() format for each line in -e/--uk-bank-holiday-list file. Default: %(default)s')
 
 	group = parser.add_argument_group('Misc other options')
 	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
@@ -1101,10 +1103,10 @@ def main(args=None):
 	log = get_logger('main')
 
 	bank_holidays = set()
-	if opts.uk_bank_holiday_list:
-		with pathlib.Path(opts.uk_bank_holiday_list).open() as src:
-			for line in src.read().splitlines():
-				bank_holidays.add(datetime.datetime.strptime(line, opts.uk_bank_holiday_fmt).date())
+	# if opts.uk_bank_holiday_list:
+	# 	with pathlib.Path(opts.uk_bank_holiday_list).open() as src:
+	# 		for line in src.read().splitlines():
+	# 			bank_holidays.add(datetime.datetime.strptime(line, opts.uk_bank_holiday_fmt).date())
 
 	if opts.test_train_uid:
 		test_uids = opts.test_train_uid.split()

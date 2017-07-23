@@ -512,8 +512,8 @@ class GTFSDB:
 									runs_from AS a , runs_to AS b, bank_holiday_running AS always,
 									CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
 								FROM {cif_db}.schedule
-								WHERE train_uid = %s
-								ORDER BY FIELD(stp_indicator,'P','N','O','C'), id''', train_uid):
+								WHERE train_uid IN ({train_uid_tuple})
+								ORDER BY FIELD(stp_indicator,'P','N','O','C'), id'''):
 							days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
 							print(
 								f'    {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
