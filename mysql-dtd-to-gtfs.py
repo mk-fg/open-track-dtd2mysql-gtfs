@@ -396,11 +396,10 @@ AssocApply = collections.namedtuple('AssocApply', 'quirks scheds')
 
 class Association:
 
-	def __init__(self, base, assoc, t, stop, assoc_next_day, cal):
-		self.base, self.assoc, self.t, self.stop, self.cal = base, assoc, t, stop, Calendar.re(cal)
-		self.cal_assoc_offset = int(bool(assoc_next_day))
-		self.cal_assoc = self.cal.shift(self.cal_assoc_offset)
-		self._hash_tuple = self.base, self.assoc, self.stop # calendar is mutable
+	def __init__(self, base, assoc, t, stop, assoc_next_day, cal, **meta):
+		self.base, self.assoc, self.t, self.stop, self.meta = base, assoc, t, stop, meta
+		self.cal, self.cal_assoc_offset = Calendar.re(cal), int(bool(assoc_next_day))
+		self._hash_tuple = self.base, self.assoc, self.t, self.cal_assoc_offset, self.stop
 
 	def __bool__(self): return bool(self.cal)
 	def __eq__(self, assoc): return self._hash_tuple == assoc._hash_tuple
@@ -408,6 +407,10 @@ class Association:
 	def __repr__(self):
 		n = ' N' if self.cal_assoc_offset else ''
 		return f'<A {self.base} {self.assoc} {self.t.name} {self.stop} {self.cal}{n}>'
+
+	@property
+	def cal_assoc(self):
+		return self.cal.shift(self.cal_assoc_offset)
 
 	def get_assoc_stops(self, head, tail):
 		'''Build stop sequence for this assoc from head/tail sequences
@@ -756,8 +759,8 @@ class DTDtoGTFS:
 					continue
 
 				if s.stp_indicator in 'ONC':
-					for schedule in train_schedules:
-						ops = schedule.cal.subtract(svc_span)
+					for sched in train_schedules:
+						ops = sched.cal.subtract(svc_span)
 						for do in filter(None, ops):
 							self.stats[f'svc-diff-op'] += 1
 							self.stats[f'svc-diff-{do.name}'] += 1
@@ -795,8 +798,8 @@ class DTDtoGTFS:
 					sched_stops.append(ScheduleStop(
 						st.crs_code, ts_arr, ts_dep, pickup_type, drop_off_type ))
 
-				sched = Schedule(
-					s.train_uid, sched_stops, [svc_span], trip_short_name=s.retail_train_id )
+				sched = Schedule( s.train_uid, sched_stops,
+					[svc_span], trip_short_name=s.retail_train_id )
 				train_schedules.append(sched)
 
 			yield ScheduleSet(train_uid, train_schedules)
@@ -819,7 +822,7 @@ class DTDtoGTFS:
 			JOIN {self.db_cif}.tiploc tl ON a.assoc_location = tl.tiploc_code
 			ORDER BY a.base_uid, a.assoc_uid, FIELD(a.stp_indicator,'P','O','N','C'), a.id''')
 		for key, group in it.groupby(assoc_list, key=op.attrgetter('base_uid', 'assoc_uid')):
-			trains_assoc = set() # records for base-assoc pair
+			trains_assoc = dict() # records for base-assoc pair
 			for a in group:
 				at = assoc_types.get(a.assoc_cat) # stp=C rows can have empty type
 				self.stats[ f'assoc-type-{at.name}'
@@ -827,20 +830,20 @@ class DTDtoGTFS:
 				if a.assoc_date_ind not in [None, 'N', 'S']:
 					self.stats[f'assoc-date-ind-{a.assoc_date_ind}'] += 1
 				try:
-					assoc_span = Timespan( a.start_date, a.end_date,
-						weekdays=tuple(getattr(a, k) for k in Timespan.weekday_order) )
-					assoc = Association( a.base_uid, a.assoc_uid,
-						at, a.crs_code, a.assoc_date_ind == 'N', [assoc_span] )
+					assoc = Association(
+						a.base_uid, a.assoc_uid, at, a.crs_code, a.assoc_date_ind == 'N',
+						Timespan( a.start_date, a.end_date,
+							weekdays=tuple(getattr(a, k) for k in Timespan.weekday_order) ) )
 				except TimespanEmpty:
 					self.stats['assoc-empty-span'] += 1
 					continue
 				if a.stp_indicator in 'ONC':
 					for assoc2 in trains_assoc:
-						if assoc2 == assoc and a.stp_indicator != 'C':
-							assoc2.cal.extend(assoc_span)
-						else: assoc2.cal.subtract(assoc_span)
-					if a.stp_indicator == 'C': continue
-				if assoc.t and assoc not in trains_assoc: trains_assoc.add(assoc)
+						if assoc2 != assoc or a.stp_indicator == 'C':
+							assoc2.cal.subtract(assoc.cal)
+					if a.stp_indicator == 'C' or not assoc.t or assoc in trains_assoc: continue
+				if assoc in trains_assoc: trains_assoc[assoc].cal.extend(assoc.cal)
+				else: trains_assoc[assoc] = assoc
 			for assoc in filter(None, trains_assoc):
 				for n, train_uid in enumerate([assoc.base, assoc.assoc]):
 					assoc_map[train_uid][n].append(assoc)
@@ -937,7 +940,8 @@ class DTDtoGTFS:
 
 					# XXX: check if more trip/stop metadata can be filled-in here
 					self.insert( 'gtfs.trips',
-						trip_id=trip_id, route_id=route_id, service_id=0, **s.meta )
+						trip_id=trip_id, route_id=route_id, service_id=0,
+						**dict((k,v) for k,v in s.meta.items() if not k.startswith('_')) )
 					for n, st in enumerate(s.stops, 1):
 						if not (st.ts_arr and st.ts_dep): continue # non-public stop
 						self.insert( 'gtfs.stop_times',
@@ -1083,7 +1087,7 @@ def main(args=None):
 	group.add_argument('--test-memory-schema', action='store_true',
 		help='Process schema dump passed to -s/--dst-gtfs-schema'
 			' option and replace table engine with ENGINE=MEMORY.')
-	group.add_argument('--test-no-output', action='store_true',
+	group.add_argument('-x', '--test-no-output', action='store_true',
 		help='Instead of populating destination schema with results, just drop these on the floor.')
 	group.add_argument('--test-no-commit', action='store_true',
 		help='Do not commit data transaction to destination tables.'
