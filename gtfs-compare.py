@@ -369,6 +369,7 @@ class GTFSDB:
 					if trip.svc_id in trip_span_idx[trip_hash]: stats[db]['trip-dup'] += 1 # same stops/svc
 					trip_span_idx[trip_hash].add(trip.svc_id)
 					trip_stops_idx[trip_hash] = trip_stops
+			train_uid_tuple = ','.join(map(self.escape, train_uid.split('_')))
 
 
 			log.debug('Comparing trip stops for train_uid={}...', train_uid)
@@ -413,23 +414,38 @@ class GTFSDB:
 				if cif_db:
 					print('cif schedules/stops (for reference):')
 					for s in self.q(f'''
-								SELECT
-									s.train_uid, s.id, stp_indicator AS stp,
-									runs_from AS a , runs_to AS b, bank_holiday_running AS always,
-									CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
-									crs_code, public_arrival_time AS ts_arr, public_departure_time AS ts_dep
-								FROM {cif_db}.schedule s
-								LEFT JOIN {cif_db}.stop_time st ON st.schedule = s.id
-								LEFT JOIN {cif_db}.tiploc t ON t.tiploc_code = st.location
-								WHERE train_uid IN ({{}}) AND (st.id IS NULL OR t.crs_code IS NOT NULL)
-								ORDER BY FIELD(stp_indicator,'P','N','O','C'), s.id, st.id'''\
-							.format(','.join(map(self.escape, train_uid.split('_')))) ):
+							SELECT
+								s.train_uid, s.id, stp_indicator AS stp,
+								runs_from AS a , runs_to AS b, bank_holiday_running AS always,
+								CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
+								crs_code, public_arrival_time AS ts_arr, public_departure_time AS ts_dep
+							FROM {cif_db}.schedule s
+							LEFT JOIN {cif_db}.stop_time st ON st.schedule = s.id
+							LEFT JOIN {cif_db}.tiploc t ON t.tiploc_code = st.location
+							WHERE
+								train_uid IN ({train_uid_tuple})
+								AND (st.id IS NULL OR t.crs_code IS NOT NULL)
+							ORDER BY FIELD(stp_indicator,'P','O','N','C'), s.id, st.id'''):
 						days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
 						print(
 							f'  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
 							'A' if s.always else ' ', s.crs_code or '---',
 							dts_format(s.ts_arr), dts_format(s.ts_dep) )
-
+					print('cif associations (for reference):')
+					for a in self.q(f'''
+							SELECT
+								a.id, base_uid, assoc_uid, start_date AS a, end_date AS b,
+								stp_indicator as stp, crs_code, assoc_cat, assoc_date_ind,
+								CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
+							FROM {cif_db}.association a
+							JOIN {cif_db}.tiploc tl ON a.assoc_location = tl.tiploc_code
+							WHERE a.base_uid IN ({train_uid_tuple}) OR a.assoc_uid IN ({train_uid_tuple})
+							ORDER BY a.base_uid, a.assoc_uid, FIELD(a.stp_indicator,'P','O','N','C'), a.id'''):
+						days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
+						print(
+							( f'  {a.base_uid} {a.assoc_uid} {a.id:>7d}'
+								f' {a.stp} {a.assoc_cat or "--"} {{}} {a.crs_code} {a.a} {a.b} {days}' )\
+							.format('N' if a.assoc_date_ind == 'N' else '-') )
 
 			log.debug('Comparing trip calendars for train_uid={}...', train_uid)
 			th1, th2 = (set(trip_info[db].spans.keys()) for db in dbs)
@@ -502,6 +518,21 @@ class GTFSDB:
 							print(
 								f'    {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
 								'no-holidays' if s.always else '' )
+						print('  cif associations (for reference):')
+						for a in self.q(f'''
+								SELECT
+									a.id, base_uid, assoc_uid, start_date AS a, end_date AS b,
+									stp_indicator as stp, crs_code, assoc_cat, assoc_date_ind,
+									CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
+								FROM {cif_db}.association a
+								JOIN {cif_db}.tiploc tl ON a.assoc_location = tl.tiploc_code
+								WHERE a.base_uid IN ({train_uid_tuple}) OR a.assoc_uid IN ({train_uid_tuple})
+								ORDER BY a.base_uid, a.assoc_uid, FIELD(a.stp_indicator,'P','O','N','C'), a.id'''):
+							days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
+							print(
+								( f'    {a.base_uid} {a.assoc_uid} {a.id:>7d}'
+									f' {a.stp} {a.assoc_cat or "--"} {{}} {a.crs_code} {a.a} {a.b} {days}' )\
+								.format('N' if a.assoc_date_ind == 'N' else '-') )
 
 			for db in dbs:
 				for k, v in stats[db].items(): log.info('[{}] Quirk count: {}={}', db, k, v)
