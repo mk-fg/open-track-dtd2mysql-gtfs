@@ -77,12 +77,6 @@ def iter_range(a, b, step):
 		if v == b: break
 		v += step
 
-def get_index(func, seq):
-	for n, v in enumerate(seq):
-		if func(v): break
-	else: raise IndexError
-	return n
-
 iter_chain = it.chain.from_iterable
 list_chain = lambda v: list(iter_chain(v))
 
@@ -415,8 +409,27 @@ class Association:
 		n = ' N' if self.cal_assoc_offset else ''
 		return f'<A {self.base} {self.assoc} {self.t.name} {self.stop} {self.cal}{n}>'
 
-	def assoc_stop(self, st1, st2):
-		return st1._replace(ts_dep=st2.ts_dep, pickup=st2.pickup)
+	def get_assoc_stops(self, head, tail):
+		'''Build stop sequence for this assoc from head/tail sequences
+				containing assoc.stop (or empty, in case of missing schedules).
+			Returns stop sequence or None if assoc stop cannot be found.'''
+		stop_pos = [head, tail]
+		for n, stops in enumerate(stop_pos):
+			if not stops:
+				stop_pos[n] = -1, None
+				continue
+			for m, stop in enumerate(stops):
+				if stop.id == self.stop: break
+			else: return
+			stop_pos[n] = m, stop
+		(n, st1), (m, st2) = stop_pos
+		stops, st1, st2 = list(), st1 or st2, st2 or st1
+		assoc_stop = st1._replace(ts_dep=st2.ts_dep, pickup=st2.pickup)
+		if head: stops.extend(head[:n])
+		stops.append(assoc_stop)
+		if tail: stops.extend(tail[m+1:])
+		if len(stops) < 2: return
+		return stops
 
 	def apply(self, scheds_base, scheds_assoc):
 		'''Return new list of Schedules with this Association applied to scheds_assoc,
@@ -426,7 +439,6 @@ class Association:
 		# Any days missing in sched_base are assumed
 		#  to have original schedule with no association applied.
 		quirks, sched_res = list(), list()
-		get_stop_idx = ft.partial(get_index, lambda s,chk_id=self.stop: s.id == chk_id)
 		if not scheds_base:
 			quirks.append(AssocQuirk.no_base)
 			scheds_base = [None]
@@ -445,12 +457,8 @@ class Association:
 				if self.t == AssocType.split:
 					train_uid = f'{self.base}_{self.assoc}'
 					head, tail = tail, head
-				try:
-					n, m = map(get_stop_idx, [head, tail])
-					stops = list(it.chain( head[:n],
-						[self.assoc_stop(head[n], tail[m])], tail[m+1:] ))
-					if len(stops) < 2: raise IndexError
-				except IndexError:
+				stops = self.get_assoc_stops(head, tail)
+				if not stops:
 					quirks.append(AssocQuirk.no_stop)
 					continue
 				sched_res.append(sched.copy(stops=stops, cal=cal, train_uid=train_uid))
