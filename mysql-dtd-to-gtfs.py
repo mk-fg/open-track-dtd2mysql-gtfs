@@ -457,6 +457,7 @@ class Association:
 				if self.t == AssocType.split:
 					train_uid = f'{self.base}_{self.assoc}'
 					head, tail = tail, head
+				if not sched_base: train_uid = self.assoc # ts compat
 				stops = self.get_assoc_stops(head, tail)
 				if not stops:
 					quirks.append(AssocQuirk.no_stop)
