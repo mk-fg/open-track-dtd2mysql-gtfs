@@ -528,7 +528,7 @@ class GTFSDB:
 								JOIN {cif_db}.tiploc tl ON a.assoc_location = tl.tiploc_code
 								WHERE a.base_uid IN ({train_uid_tuple}) OR a.assoc_uid IN ({train_uid_tuple})
 								ORDER BY a.base_uid, a.assoc_uid, FIELD(a.stp_indicator,'P','O','N','C'), a.id'''):
-							days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
+							days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, a.days)))
 							print(
 								( f'    {a.base_uid} {a.assoc_uid} {a.id:>7d}'
 									f' {a.stp} {a.assoc_cat or "--"} {{}} {a.crs_code} {a.a} {a.b} {days}' )\
