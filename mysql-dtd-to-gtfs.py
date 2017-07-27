@@ -383,12 +383,11 @@ class Schedule:
 		state.update(updates)
 		return Schedule(**state)
 
-	def stop_rollover_check( self, ts_arr, ts_dep,
-			dts_day=24*3600, dts_pre=23*3600, dts_post=1*3600 ):
+	def stop_rollover_check(self, ts_arr, ts_dep, arr_min=23*3600, dep_max=1*3600):
 		if ts_dep >= ts_arr: return False
 		if ts_arr.days > ts_dep.days: return True # rollover already happened on earlier stop
 		elif ( ts_arr.days == ts_dep.days
-			and ts_arr.seconds > dts_pre and ts_dep.seconds < dts_post ): return True
+			and ts_arr.seconds >= arr_min and ts_dep.seconds <= dep_max ): return True
 		raise ScheduleError(f'Stop arrival/departure times mismatch: {ts_arr} -> {ts_dep}')
 
 	def rollover_stop_times(self, stops):
