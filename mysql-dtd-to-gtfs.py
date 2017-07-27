@@ -416,19 +416,24 @@ class Association:
 
 	def __init__(self, base, assoc, t, stop, assoc_next_day, cal, **meta):
 		self.base, self.assoc, self.t, self.stop, self.meta = base, assoc, t, stop, meta
-		self.cal, self.cal_assoc_offset = Calendar.re(cal), int(bool(assoc_next_day))
+		self.cal = Calendar.re(cal)
+		self.cal_base_offset = self.cal_assoc_offset = 0
+		if assoc_next_day:
+			if t == AssocType.split: self.cal_assoc_offset = 1
+			elif t == AssocType.join: self.cal_base_offset = 1
 		self._hash_tuple = self.base, self.assoc, self.t, self.cal_assoc_offset, self.stop
 
 	def __bool__(self): return bool(self.cal)
 	def __eq__(self, assoc): return self._hash_tuple == assoc._hash_tuple
 	def __hash__(self): return hash(self._hash_tuple)
 	def __repr__(self):
-		n = ' N' if self.cal_assoc_offset else ''
+		n = ' N' if self.cal_assoc_offset or self.cal_base_offset else ''
 		return f'<A {self.base} {self.assoc} {self.t.name} {self.stop} {self.cal}{n}>'
 
 	@property
-	def cal_assoc(self):
-		return self.cal.shift(self.cal_assoc_offset)
+	def cal_assoc(self): return self.cal.shift(self.cal_assoc_offset)
+	@property
+	def cal_base(self): return self.cal.shift(self.cal_base_offset)
 
 	def get_assoc_stops(self, head, tail):
 		'''Build stop sequence for this assoc from head/tail sequences
@@ -868,8 +873,10 @@ class DTDtoGTFS:
 			assert not (assocs_base and assocs), ss.train_uid
 			if assocs_base:
 				for assoc, sched in it.product(assocs_base, ss.sched_list):
-					assoc_cal = assoc.cal.intersection(sched.cal)
-					if assoc_cal: sched_idx_base[assoc].append(sched.copy(cal=assoc_cal))
+					assoc_cal = assoc.cal_base.intersection(sched.cal)
+					if assoc_cal:
+						sched_idx_base[assoc].append(
+							sched.copy(cal=assoc_cal.shift(-assoc.cal_base_offset)) )
 				yield from ss.sched_list # base schedules don't change at all
 				continue
 			train_assoc_cal, train_assoc_days = Calendar(), set()
