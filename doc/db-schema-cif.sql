@@ -292,8 +292,36 @@ CREATE TABLE `z_stop_time` (
   UNIQUE KEY `z_stop_time_key` (`z_schedule`,`location`,`public_departure_time`)
 ) ENGINE=InnoDB AUTO_INCREMENT=38354 DEFAULT CHARSET=utf8mb4;
 /*!40101 SET character_set_client = @saved_cs_client */;
-/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
+--
+-- Table structure for table `additional_fixed_link`
+--
+
+DROP TABLE IF EXISTS `additional_fixed_link`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8 */;
+CREATE TABLE `additional_fixed_link` (
+  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+  `mode` varchar(10) NOT NULL,
+  `origin` char(3) NOT NULL,
+  `destination` char(3) NOT NULL,
+  `duration` smallint(3) unsigned NOT NULL,
+  `start_time` time DEFAULT NULL,
+  `end_time` time DEFAULT NULL,
+  `start_date` date NOT NULL,
+  `end_date` date NOT NULL,
+  `monday` tinyint(1) unsigned NOT NULL,
+  `tuesday` tinyint(1) unsigned NOT NULL,
+  `wednesday` tinyint(1) unsigned NOT NULL,
+  `thursday` tinyint(1) unsigned NOT NULL,
+  `friday` tinyint(1) unsigned NOT NULL,
+  `saturday` tinyint(1) unsigned NOT NULL,
+  `sunday` tinyint(1) unsigned NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
 /*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
 /*!40014 SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS */;
