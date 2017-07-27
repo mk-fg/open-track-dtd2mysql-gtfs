@@ -299,6 +299,35 @@ class GTFSDB:
 
 		self.commit()
 
+	def diff_check_skip_rollovers(self, diff):
+		stop_sets = tuple(tuple(
+			( tuple((crs, ts_arr[2:], ts_dep[2:]) for crs,ts_arr,ts_dep in stops)
+				if stops[0][1].startswith('1+:') else stops )
+			for stops in db_stops if stops ) for db_stops in stop_sets)
+		diff_fixed = diff_func(*stop_sets)
+		if diff_fixed: return diff
+
+	def diff_check_skip_sched_times(self, diff):
+		side1, side2 = (diff.get(f'set_item_{t}', list()) for t in ['added', 'removed'])
+		if len(side1) != len(side2): return diff
+		stops2_matched = set()
+		for stops1 in map(op.attrgetter('t2'), side1):
+			for stops2 in map(op.attrgetter('t1'), side2):
+				if stops2 in stops2_matched or len(stops1) != len(stops2): continue
+				for s1, s2, in zip(stops1, stops2):
+					if s1 == s2: continue
+					crs, ts_arr, ts_dep = s1
+					if ts_arr == ts_dep and ts_arr in s2[1:]: continue
+					crs, ts_arr, ts_dep = s2
+					if ts_arr == ts_dep and ts_arr in s1[1:]: continue
+					break
+				else: # stops1 == stops2
+					stops2_matched.add(stops2)
+					break
+			else: break # found non-matching stops1 - proper diff
+		else: return # found match for all stops1, discard diff
+		return diff
+
 	def compare( self, db1, db2, cif_db=None, skip_diffs=None, train_uid_limit=None,
 			train_uid_seek=None, train_uid_next=False, stop_after_train_uid_mismatch=False ):
 		log, dbs = self.log, (db1, db2)
@@ -310,6 +339,7 @@ class GTFSDB:
 
 		skip_holidays = (skip_diffs and skip_diffs.get('holidays')) or set()
 		skip_rollovers = skip_diffs and skip_diffs.get('rollover')
+		skip_sched_times = skip_diffs and skip_diffs.get('sched_times')
 
 		tuid_sets = tuple(
 			set(map( op.itemgetter(0),
@@ -375,13 +405,8 @@ class GTFSDB:
 			log.debug('Comparing trip stops for train_uid={}...', train_uid)
 			stop_sets = tuple(set(trip_info[db].stops.values()) for db in dbs)
 			diff = diff_func(*stop_sets)
-			if diff and skip_rollovers:
-				stop_sets = tuple(tuple(
-					( tuple((crs, ts_arr[2:], ts_dep[2:]) for crs,ts_arr,ts_dep in stops)
-						if stops[0][1].startswith('1+:') else stops )
-					for stops in db_stops if stops ) for db_stops in stop_sets)
-				diff_fixed = diff_func(*stop_sets)
-				if not diff_fixed: diff = diff_fixed
+			if diff and skip_rollovers: diff = self.diff_check_skip_rollovers(diff)
+			if diff and skip_sched_times: diff = self.diff_check_skip_sched_times(diff)
 			if diff:
 				diff_found |= True
 				added, removed = diffs = \
@@ -592,6 +617,9 @@ def main(args=None):
 	group = cmd.add_argument_group('Diff class skipping')
 	cmd.add_argument('--skip-midnight-rollover-diffs', action='store_true',
 		help='Skip diffs where stop times start at 00:xx and have +1 day in one case.')
+	cmd.add_argument('--skip-arr-dep-time-diffs', action='store_true',
+		help='Skip diffs where there is extra arr/dep time, missing in other dataset.'
+			' Workaround for ts implementation using scheduled times for public stops.')
 	cmd.add_argument('--skip-bank-holiday-diffs', metavar='holiday-file',
 		help='Skip diffs that only have bank-holiday dates from specified list file.')
 	cmd.add_argument('--skip-bank-holiday-fmt',
@@ -615,12 +643,13 @@ def main(args=None):
 			db.parse(opts.db_name, opts.src_path, opts.gtfs_schema)
 
 		elif opts.call == 'compare':
-			skip = dict(holidays=set(), rollover=False)
+			skip = dict( holidays=set(),
+				rollover=opts.skip_midnight_rollover_diffs,
+				sched_times=opts.skip_arr_dep_time_diffs )
 			if opts.skip_bank_holiday_diffs:
 				with pathlib.Path(opts.skip_bank_holiday_diffs).open() as src:
 					for line in src.read().splitlines(): skip['holidays'].add(
 						datetime.datetime.strptime(line, opts.skip_bank_holiday_fmt).date() )
-			if opts.skip_midnight_rollover_diffs: skip['rollover'] = True
 			db.compare(
 				opts.db1, opts.db2, cif_db=opts.cif_db, train_uid_limit=opts.train_uid_limit,
 				train_uid_seek=opts.train_uid_seek, train_uid_next=opts.train_uid_seek_next,
