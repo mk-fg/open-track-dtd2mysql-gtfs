@@ -109,6 +109,7 @@ class NTCursor(pymysql.cursors.SSDictCursor):
 
 class ConversionError(Exception): pass
 class CIFError(ConversionError): pass
+class ScheduleError(ConversionError): pass
 
 
 one_day = datetime.timedelta(days=1)
@@ -358,6 +359,7 @@ ScheduleSet = collections.namedtuple('SchedSet', 'train_uid sched_list')
 class Schedule:
 
 	def __init__(self, train_uid, stops, cal, **meta):
+		self.quirks = collections.Counter()
 		self.train_uid, self.cal, self.meta = train_uid, Calendar.re(cal), meta
 		self.stops = tuple(self.rollover_stop_times(stops))
 		meta.update(trip_headsign=train_uid)
@@ -377,6 +379,15 @@ class Schedule:
 		state.update(updates)
 		return Schedule(**state)
 
+	def stop_rollover_check( self, ts_arr, ts_dep,
+			dts_day=24*3600, dts_pre=23*3600, dts_post=1*3600 ):
+		if ts_dep >= ts_arr: return False
+		(days_arr, dts_arr), (days_dep, dts_dep) = (
+			divmod(ts.total_seconds(), dts_day) for ts in [ts_arr, ts_dep] )
+		if days_arr > days_dep: return True # rollover already happened on earlier stop
+		elif days_arr == days_dep and dts_arr > dts_pre and dts_dep < dts_post: return True
+		raise ScheduleError(f'Stop arrival/departure times mismatch: {ts_arr} -> {ts_dep}')
+
 	def rollover_stop_times(self, stops):
 		ts_prev = None
 		for st in stops:
@@ -384,7 +395,11 @@ class Schedule:
 				ts_arr, ts_dep = ts_tuple = st.ts_arr, st.ts_dep
 				if not ts_prev: ts_prev = ts_dep
 				elif ts_prev > ts_arr: ts_arr += one_day
-				if ts_dep < ts_arr: ts_dep += one_day
+				try:
+					if self.stop_rollover_check(ts_arr, ts_dep): ts_dep += one_day
+				except ScheduleError:
+					ts_arr = ts_dep # use earliest time
+					self.quirks['arr-dep-mismatch'] += 1
 				if (ts_arr, ts_dep) != ts_tuple:
 					st = st._replace(ts_arr=ts_arr, ts_dep=ts_dep)
 			yield st
@@ -773,28 +788,15 @@ class DTDtoGTFS:
 					self.stats['sched-without-stops'] += 1
 					continue
 
-				sched_stops = list()
-
 				# XXX: time conversions - DTD->GTFS
-				ts_prev, ts_origin = None, min(filter(None, it.chain.from_iterable(
-					[ st.scheduled_arrival_time, st.scheduled_departure_time,
-						st.scheduled_pass_time, st.public_arrival_time, st.public_departure_time ]
-					for st in stops )))
+				sched_stops = list()
 				for st in stops:
 					ts_arr, ts_dep = st.public_arrival_time, st.public_departure_time
 					pickup_type = GTFSEmbarkType.regular if ts_dep else GTFSEmbarkType.none
 					drop_off_type = GTFSEmbarkType.regular if ts_arr else GTFSEmbarkType.none
-					ts_arr = ts_arr or st.scheduled_arrival_time
-					ts_dep = ts_dep or st.scheduled_departure_time
-					# XXX: check if origin has some arrival time indication in CIF data
+					if not (ts_arr or ts_dep): # avoid mixing scheduled/public times
+						ts_arr, ts_dep = st.scheduled_arrival_time, st.scheduled_departure_time
 					ts_arr, ts_dep = ts_arr or ts_dep, ts_dep or ts_arr # origin/termination stops
-
-					# Midnight rollover and sanity check
-					if ts_arr and ts_dep:
-						if (ts_prev or ts_origin) > ts_arr: ts_arr += one_day
-						if ts_dep < ts_arr: ts_dep += one_day
-						ts_prev = ts_dep
-
 					sched_stops.append(ScheduleStop(
 						st.crs_code, ts_arr, ts_dep, pickup_type, drop_off_type ))
 
@@ -918,6 +920,7 @@ class DTDtoGTFS:
 		trip_merge_idx = dict() # {trip_hash: gtfs.trip_id}
 
 		for s in schedules:
+				for k, v in s.quirks.items(): self.stats[f'sched-quirk-{k}'] += v
 
 				if len(s.stops) < 2: # XXX: find out what these represent
 					self.stats['trip-no-stops'] += 1
