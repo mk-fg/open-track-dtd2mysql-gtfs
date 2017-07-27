@@ -294,6 +294,8 @@ class Calendar:
 	def __hash__(self): return hash(frozenset(self.spans))
 	def __repr__(self): return f'<Cal[ {self.compressed().cal.spans} ]>'
 
+	def copy(self): return Calendar(self.spans)
+
 	def date_iter(self):
 		return sorted(set(iter_chain(s.date_iter() for s in self.spans)))
 
@@ -337,12 +339,9 @@ class Calendar:
 			tuple(s.weekdays[(n-offset)%7] for n in range(7)),
 			set(day + offset_days for day in s.except_days) ) for s in self.spans))
 
-	def partition(self, cal):
-		'Return calendars for intersection and difference from specified cal.'
-		return self.intersection(cal), self.difference(cal).cal
-
 	def union(self, *cals):
 		return Calendar(set(self.spans).union(iter_chain(Calendar.re(cal).spans for cal in cals)))
+
 
 	def extend(self, *cals):
 		self.spans = self.union(*cals).spans
@@ -351,6 +350,11 @@ class Calendar:
 		ops, cal_diff = self.difference(cal)
 		self.spans = cal_diff.spans
 		return ops
+
+	def intersect(self, *cals):
+		for cal in cals: self.spans = self.intersection(cal).spans
+
+	def clear(self): self.spans = list()
 
 
 ScheduleStop = collections.namedtuple('SchedStop', 'id ts_arr ts_dep pickup dropoff')
@@ -461,14 +465,12 @@ class Association:
 			quirks.append(AssocQuirk.no_base)
 			scheds_base = [None]
 		for sched in scheds_assoc:
-			sched_cal_orig = Calendar() # cal with no overlap with any sched_base
+			sched_cal_orig = sched.cal.copy() # cal with no overlap with any sched_base
 			for sched_base in scheds_base:
-				if sched_base:
-					cal, cal_diff = sched.cal.partition(sched_base.cal)
-					if not cal: continue
-					sched_cal_orig.subtract(cal)
-					if cal_diff: sched_cal_orig.extend(cal_diff)
-				else: cal = sched.cal
+				cal = ( sched.cal if not sched_base
+					else sched.cal.intersection(sched_base.cal) )
+				if not cal: continue
+				sched_cal_orig.subtract(cal)
 				head, tail = sched.stops, sched_base.stops if sched_base else list()
 				if self.t == AssocType.join:
 					train_uid = f'{self.assoc}_{self.base}'
