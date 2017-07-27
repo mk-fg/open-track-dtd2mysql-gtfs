@@ -841,7 +841,7 @@ class DTDtoGTFS:
 					for assoc2 in trains_assoc:
 						if assoc2 != assoc or a.stp_indicator == 'C':
 							assoc2.cal.subtract(assoc.cal)
-					if a.stp_indicator == 'C' or not assoc.t or assoc in trains_assoc: continue
+					if a.stp_indicator == 'C' or not assoc.t: continue
 				if assoc in trains_assoc: trains_assoc[assoc].cal.extend(assoc.cal)
 				else: trains_assoc[assoc] = assoc
 			for assoc in filter(None, trains_assoc):
