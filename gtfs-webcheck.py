@@ -175,16 +175,14 @@ class GWCTripStop:
 
 class GWCTrip:
 
+	TripSig = collections.namedtuple('TripSig', 'src dst train_uid ts_src')
+
 	@classmethod
 	def from_serw_cps(cls, sig, stops, links):
 		embark_flags = dict(
 			Normal=(True, True), Passing=(False, False),
 			PickUpOnly=(True, False), SetDownOnly=(False, True) )
-		src, dst, date1, train_info = sig.split(';')
-		if not train_info: return
-		train_uid, date2 = train_info.split('|', 1)
-		# XXX: not sure what to do with date1/date2
-		trip_stops = list()
+		src, dst, trip_stops = sig.src, sig.dst, list()
 		for stop in stops:
 			stop_info = links[stop['station']]
 			pickup, dropoff = embark_flags[stop['pattern']]
@@ -192,20 +190,24 @@ class GWCTrip:
 				dt.datetime.strptime(stop['time']['scheduledTime'], '%Y-%m-%dT%H:%M:%S') )
 			name, crs, nlc, lat, lon = op.itemgetter(
 				'name', 'crs', 'nlc', 'latitude', 'longitude' )(stop_info)
-			if src and src != nlc: continue
+			if src and src != crs: continue
 			src = trip_stops.append(GWCTripStop(
 				crs, nlc, ts, pickup, dropoff, name=name, lat=lat, lon=lon ))
-			if dst == nlc: break
-		return cls(train_uid, None, trip_stops) # XXX: process in order, pass time from jn_sig
+			if dst == crs: break
+		return cls(sig.train_uid, sig.ts_src, trip_stops)
 
 	def __init__(self, train_uid, ts_start, stops):
 		self.train_uid, self.ts_start, self.stops = train_uid, ts_start, stops
 
 	def __repr__(self):
-		return f'<Trip on {self.ts_start} [{" - ".join(ts.crs for ts in self.stops)}]>'
+		return (
+			f'<Trip {self.train_uid} [{self.ts_start}]'
+				f' [{" - ".join(ts.crs for ts in self.stops)}]>' )
 
 
 class GWCJnSig:
+
+	JnSigTrip = collections.namedtuple('JnSigTrip', 'src ts_src dst ts_dst')
 
 	@classmethod
 	def from_serw_url(cls, jn_sig_str):
@@ -219,7 +221,7 @@ class GWCJnSig:
 				ts_src, ts_dst = cls._parse_times(jn_sig)
 				assert ts_src >= ts0, [ts0, ts_src]
 				rsid, rsid_prefix = popn(jn_sig, 2)
-				trips.append((src, ts_src, dst, ts_dst))
+				trips.append(cls.JnSigTrip(src, ts_src, dst, ts_dst))
 				ts0 = ts_dst
 			elif t == 'transfer':
 				src, dst, delta, tt = popn(jn_sig, 4)
@@ -239,32 +241,53 @@ class GWCJnSig:
 
 	def __repr__(self):
 		stops = list()
-		for trip in self.trips:
-			src, ts_src, dst, ts_dst = trip
-			ts_src, ts_dst = (ts.strftime("%H:%M") for ts in [ts_src, ts_dst])
+		for jst in self.trips:
+			src, ts_src, dst, ts_dst = jst
+			ts_src, ts_dst = (ts.strftime('%H:%M') for ts in [ts_src, ts_dst])
 			if not stops or src != stops[-1][0]: stops.append([src, ts_src])
 			elif stops[-1][1] != ts_src: stops[-1][1] += f'/{ts_src}'
 			stops.append([dst, ts_dst])
 		stops = ' - '.join(f'{crs}[{ts}]' for crs, ts in stops)
-		span = ' '.join(ts.strftime("%H:%M") for ts in [self.ts_start, self.ts_end])
+		span = ' '.join(ts.strftime('%H:%M') for ts in [self.ts_start, self.ts_end])
 		return f'<JnSig [{span}] [{stops}]>'
+
+	def trip_index(self, src, dst):
+		for n, t in enumerate(self.trips):
+			if (src, dst) == (t.src, t.dst): return n, t
+		raise IndexError(src, dst)
 
 
 class GWCJn:
 
 	@classmethod
 	def from_serw_cps(cls, jn_sig, cps):
-		if isinstance(jn_sig, str):
-			jn_sig = GWCJnSig.from_serw_url(jn_sig)
-		trips = list(filter( None,
-			( GWCTrip.from_serw_cps(sig, stops, cps['links'])
-				for sig, stops in cps['result'].items() ) ))
-		# XXX: order trips by jn_sig here
-		print(jn_sig, trips)
-		exit()
-		return cls(trips)
+		if isinstance(jn_sig, str): jn_sig = GWCJnSig.from_serw_url(jn_sig)
 
-	def __init__(self, trips): self.trips = trips
+		trip_order = list()
+		for sig_key in cps['result']:
+			# XXX: not sure what date1/date2 represent here
+			src, dst, date1, train_info = sig_key.split(';')
+			if not train_info: continue
+			train_uid, date2 = train_info.split('|', 1)
+			src, dst = (cps['links'][f'/data/stations/{s}']['crs'] for s in [src, dst])
+			sig_n, jst = jn_sig.trip_index(src, dst)
+			sig = GWCTrip.TripSig(src, dst, train_uid, jst.ts_src)
+			trip_order.append((sig_n, sig_key, sig))
+		trip_order.sort()
+
+		trips = list(
+			GWCTrip.from_serw_cps(sig, cps['result'][sig_key], cps['links'])
+			for n, sig_key, sig in trip_order )
+		return cls(trips, jn_sig.ts_start, jn_sig.ts_end)
+
+	def __init__(self, trips, ts_start, ts_end):
+		self.trips, self.ts_start, self.ts_end = trips, ts_start, ts_end
+
+	def __repr__(self):
+		trips = ' - '.join(( f'{t.train_uid}'
+			f'({t.ts_start.strftime("%H:%M")}+{len(t.stops)})' ) for t in self.trips)
+		span = ' '.join(ts.strftime("%H:%M") for ts in [self.ts_start, self.ts_end])
+		return f'<Jn [{span}] [{trips}]>'
 
 
 class GWC:
@@ -359,7 +382,7 @@ class GWC:
 		# 	await res.json()
 		raise GWCError(f'Falied to process station code to 4-digit nlc: {code_raw!r}')
 
-	async def get_calling_points(self, src, dst, ts_start=None, ts_end=None):
+	async def get_journeys(self, src, dst, ts_start=None, ts_end=None):
 		src = await self.get_station(src, self.st_type.src)
 		dst = await self.get_station(dst, self.st_type.dst)
 
@@ -387,17 +410,17 @@ class GWC:
 			urllib.parse.unquote_plus(res['journey'])
 			for res in jp_res['result']['outward'] )
 
+		journeys = list()
 		for jp_url in jp_urls:
 			jn_sig = GWCJnSig.from_serw_url(jp_url.rsplit('/', 1)[-1])
 			cps = await self.api_call('get', f'{jp_url}/calling-points')
-			jn = GWCJn.from_serw_cps(jn_sig, cps)
-			print(jn)
-			exit()
+			journeys.append(GWCJn.from_serw_cps(jn_sig, cps))
+		return journeys
 
 
 	async def run(self):
-		trip_info = await self.get_calling_points('SHF', 'LBG')
-		print(trip_info)
+		journeys = await self.get_journeys('SHF', 'LBG')
+		print(journeys)
 
 
 async def run_tests(loop, conf):
