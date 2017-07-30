@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
+import datetime as dt
 import os, sys, pathlib, logging, signal, locale, warnings
-import contextlib, inspect, collections, enum, time, datetime
+import contextlib, inspect, collections, enum, time
 import asyncio, urllib.parse, json, re
 
 import aiohttp # http://aiohttp.readthedocs.io
@@ -23,6 +24,7 @@ class TestConfig:
 	}
 
 	debug_http_dir = None
+	debug_cache_dir = None
 
 
 class AsyncExitStack:
@@ -149,12 +151,121 @@ class LogStyleAdapter(logging.LoggerAdapter):
 
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 
+popn = lambda v,n: list(v.pop() for m in range(n))
+url_to_fn = lambda p: p.replace('/', '-').replace('.', '_')
+
 
 # XXX: separate data sources and test types
 
 class GWCError(Exception): pass
 class GWCAPIError(GWCError): pass
 class GWCAPIErrorCode(GWCAPIError): pass
+
+
+class GWCTripStop:
+
+	def __init__(self, crs, nlc, ts, pickup, dropoff, **meta):
+		self.crs, self.nlc, self.ts, self.pickup, self.dropoff = crs, nlc, ts, pickup, dropoff
+		self.meta = meta
+
+	def __repr__(self):
+		embark = '-P'[bool(self.pickup)] + '-D'[bool(self.dropoff)]
+		ts = self.ts.strftime('%H:%M') if self.ts else 'x'
+		return f'<TS {self.crs} {self.nlc} {embark} {ts}>'
+
+class GWCTrip:
+
+	@classmethod
+	def from_serw_cps(cls, sig, stops, links):
+		embark_flags = dict(
+			Normal=(True, True), Passing=(False, False),
+			PickUpOnly=(True, False), SetDownOnly=(False, True) )
+		src, dst, date1, train_info = sig.split(';')
+		if not train_info: return
+		train_uid, date2 = train_info.split('|', 1)
+		# XXX: not sure what to do with date1/date2
+		trip_stops = list()
+		for stop in stops:
+			stop_info = links[stop['station']]
+			pickup, dropoff = embark_flags[stop['pattern']]
+			ts = ( None if not (pickup or dropoff) else
+				dt.datetime.strptime(stop['time']['scheduledTime'], '%Y-%m-%dT%H:%M:%S') )
+			name, crs, nlc, lat, lon = op.itemgetter(
+				'name', 'crs', 'nlc', 'latitude', 'longitude' )(stop_info)
+			if src and src != nlc: continue
+			src = trip_stops.append(GWCTripStop(
+				crs, nlc, ts, pickup, dropoff, name=name, lat=lat, lon=lon ))
+			if dst == nlc: break
+		return cls(train_uid, None, trip_stops) # XXX: process in order, pass time from jn_sig
+
+	def __init__(self, train_uid, ts_start, stops):
+		self.train_uid, self.ts_start, self.stops = train_uid, ts_start, stops
+
+	def __repr__(self):
+		return f'<Trip on {self.ts_start} [{" - ".join(ts.crs for ts in self.stops)}]>'
+
+
+class GWCJnSig:
+
+	@classmethod
+	def from_serw_url(cls, jn_sig_str):
+		jn_sig = collections.deque(reversed(jn_sig_str.split('|')))
+		ts_start, ts_end = cls._parse_times(jn_sig)
+		trips, ts0 = list(), ts_start
+		while jn_sig:
+			t = jn_sig.pop().lower()
+			if t == 'trip':
+				src, dst = popn(jn_sig, 2)
+				ts_src, ts_dst = cls._parse_times(jn_sig)
+				assert ts_src >= ts0, [ts0, ts_src]
+				rsid, rsid_prefix = popn(jn_sig, 2)
+				trips.append((src, ts_src, dst, ts_dst))
+				ts0 = ts_dst
+			elif t == 'transfer':
+				src, dst, delta, tt = popn(jn_sig, 4)
+				ts0 = ts0 + dt.timedelta(seconds=int(delta) * 60)
+			else: raise NotImplementedError(t, jn_sig)
+		return cls(trips, ts_start, ts_end)
+
+	@classmethod
+	def _parse_times(cls, jn_sig):
+		ts1, ts2 = (
+			dt.datetime.strptime(f'{d}-{t}', '%y%m%d-%H%M')
+			for d,t in (popn(jn_sig, 2) for n in range(2)) )
+		return ts1, ts2
+
+	def __init__(self, trips, ts_start, ts_end):
+		self.trips, self.ts_start, self.ts_end = trips, ts_start, ts_end
+
+	def __repr__(self):
+		stops = list()
+		for trip in self.trips:
+			src, ts_src, dst, ts_dst = trip
+			ts_src, ts_dst = (ts.strftime("%H:%M") for ts in [ts_src, ts_dst])
+			if not stops or src != stops[-1][0]: stops.append([src, ts_src])
+			elif stops[-1][1] != ts_src: stops[-1][1] += f'/{ts_src}'
+			stops.append([dst, ts_dst])
+		stops = ' - '.join(f'{crs}[{ts}]' for crs, ts in stops)
+		span = ' '.join(ts.strftime("%H:%M") for ts in [self.ts_start, self.ts_end])
+		return f'<JnSig [{span}] [{stops}]>'
+
+
+class GWCJn:
+
+	@classmethod
+	def from_serw_cps(cls, jn_sig, cps):
+		if isinstance(jn_sig, str):
+			jn_sig = GWCJnSig.from_serw_url(jn_sig)
+		trips = list(filter( None,
+			( GWCTrip.from_serw_cps(sig, stops, cps['links'])
+				for sig, stops in cps['result'].items() ) ))
+		# XXX: order trips by jn_sig here
+		print(jn_sig, trips)
+		exit()
+		return cls(trips)
+
+	def __init__(self, trips): self.trips = trips
+
 
 class GWC:
 
@@ -194,7 +305,15 @@ class GWC:
 		return url
 
 	async def api_call(self, method, p, j=None, headers=None, q=None):
-		self.log.debug('serw api call: {} {}', method, p)
+		self.log.debug('serw-api call: {} {}', method, p)
+		if self.conf.debug_cache_dir:
+			self.debug_files['_req'] += 1
+			cache_fn = 'api-cache.{:03d}.{}.{}.json'.format(
+				self.debug_files['_req'], method, url_to_fn(p) )
+			cache_fn = self.conf.debug_cache_dir / cache_fn
+			if cache_fn.exists():
+				self.log.debug('serw-api cache-read: {}', cache_fn)
+				return json.loads(cache_fn.read_text())
 		try:
 			async with self.http.request( method,
 					self.api_url(p, **(q or dict())), json=j, headers=headers ) as res:
@@ -203,7 +322,7 @@ class GWC:
 					raise GWCAPIError(res.status, f'non-json response - {data!r}')
 				data = await res.json()
 				if self.conf.debug_http_dir:
-					fn = 'api.{}.res.{{}}.json'.format(p.replace('/', '-').replace('.', '_'))
+					fn = f'api-req.{url_to_fn(p)}.res.{{:03d}}.json'
 					self.debug_files[fn] += 1
 					with ( self.conf.debug_http_dir /
 						fn.format(self.debug_files[fn]) ).open('w') as dst: json.dump(data, dst)
@@ -215,12 +334,18 @@ class GWC:
 					except (TypeError, ValueError, IndexError):
 						raise GWCAPIError(res.status, err)
 					else: raise GWCAPIErrorCode(res.status, *err)
+				elif isinstance(data, dict) and 'result' not in data:
+					raise GWCAPIError(res.status, f'no "result" key in data - {data!r}')
 				if res.status != 200: raise GWCAPIError(res.status, 'non-200 response status')
 		except aiohttp.ClientError as err:
 			raise GWCAPIError(None, f'[{err.__class__.__name__}] {err}') from None
+		if self.conf.debug_cache_dir:
+			self.log.debug('serw-api cache-write: {}', cache_fn)
+			cache_fn.write_text(json.dumps(data))
 		return data
 
 	st_type = enum.Enum('StationType', [('src', 'Origin'), ('dst', 'Destination')])
+
 
 	async def get_station(self, code_raw, t=None):
 		code = code_raw
@@ -240,15 +365,15 @@ class GWC:
 
 		# Default is to use current time and +2d as ts_end
 		if not ts_start:
-			ts = datetime.datetime.now()
-			ts -= datetime.timedelta(seconds=time.localtime().tm_gmtoff) # to utc
+			ts = dt.datetime.now()
+			ts -= dt.timedelta(seconds=time.localtime().tm_gmtoff) # to utc
 			if ( (ts.month > 3 or ts.month < 10) # "mostly correct" (tm) DST hack
 					or (ts.month == 3 and ts.day >= 27)
 					or (ts.month == 10 and ts_start.day <= 27) ):
-				ts += datetime.timedelta(seconds=3600)
+				ts += dt.timedelta(seconds=3600)
 			ts_start = ts
 		if not ts_end:
-			ts_end = ts_start + datetime.timedelta(days=2)
+			ts_end = ts_start + dt.timedelta(days=2)
 		ts_start, ts_end = (
 			(ts if isinstance(ts, str) else ts.strftime('%Y-%m-%dT%H:%M:%S'))
 			for ts in [ts_start, ts_end] )
@@ -263,7 +388,11 @@ class GWC:
 			for res in jp_res['result']['outward'] )
 
 		for jp_url in jp_urls:
-			journey = await self.api_call('get', f'{jp_url}/calling-points')
+			jn_sig = GWCJnSig.from_serw_url(jp_url.rsplit('/', 1)[-1])
+			cps = await self.api_call('get', f'{jp_url}/calling-points')
+			jn = GWCJn.from_serw_cps(jn_sig, cps)
+			print(jn)
+			exit()
 
 
 	async def run(self):
@@ -305,7 +434,9 @@ def main(args=None, conf=None):
 			' Either of these codes can be used for data lookups.'
 			' Empty value or "-" will create empty mapping. Default: %(default)s')
 
-	group = parser.add_argument_group('Misc/debug options')
+	group = parser.add_argument_group('Misc dev/debug options')
+	group.add_argument('--debug-cache-dir', metavar='path',
+		help='Cache API requests to dir if missing, or re-use cached ones from there.')
 	group.add_argument('--debug-http-dir', metavar='path',
 		help='Directory path to dump http various responses and headers to.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
@@ -340,8 +471,8 @@ def main(args=None, conf=None):
 					log.warning('Failed to process "crs,nlc" csv line: {!r} [{}]', line, n)
 		conf.serw_crs_nlc_map = crs_nlc_map
 
-	if opts.debug_http_dir:
-		conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
+	if opts.debug_http_dir: conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
+	if opts.debug_cache_dir: conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
 
 	log.debug('Starting run_tests loop...')
 	with contextlib.closing(asyncio.get_event_loop()) as loop:
