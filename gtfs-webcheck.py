@@ -23,6 +23,10 @@ class TestConfig:
 		# 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:54.0) Gecko/20100101 Firefox/54.0',
 	}
 
+	rate_interval = 3 # seconds
+	rate_max_concurrency = 1
+	rate_min_seq_delay = 0 # seconds, only if rate_max_concurrency=1
+
 	debug_http_dir = None
 	debug_cache_dir = None
 
@@ -153,6 +157,42 @@ get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 
 popn = lambda v,n: list(v.pop() for m in range(n))
 url_to_fn = lambda p: p.replace('/', '-').replace('.', '_')
+
+
+class RateLimiter:
+
+	def __init__(self, delay_s2s, delay_e2s=0, max_parallel=1, loop=None):
+		'''Parameters:
+			delay start-to-start - interval between starting new requests.
+				Can be extended if "max_parallel" requests are already in progress.
+			delay end-to-start - min delay from finishing last request and starting new one.
+				Cannot be used with max_parallel > 1.
+			max_parallel - how many requests are allowed to run in parallel.
+				Only useful it delay_s2s is small enough that requests don't finish within it.'''
+		assert max_parallel > 0 and delay_s2s >= 0 and delay_e2s >= 0
+		assert max_parallel == 1 or not delay_e2s, [max_parallel, delay_e2s]
+		self.s2s, self.e2s, self.n = delay_s2s, delay_e2s or 0, max_parallel
+		self.loop = loop or asyncio.get_event_loop()
+		self.ts, self.queue = self.loop.time(), asyncio.BoundedSemaphore(max_parallel)
+
+	async def acquire(self):
+		await self.queue.acquire()
+		while True:
+			delay = self.ts - self.loop.time()
+			if delay <= 0:
+				self.ts += self.delay_s2s - delay
+				return
+			try: await asyncio.sleep(delay)
+			except asyncio.CancelledError: self.queue.release()
+
+	def release(self):
+		self.queue.release()
+		if self.delay_e2s:
+			ts_next = self.loop.time() + self.delay_e2s
+			if ts_next > self.ts: self.ts = ts_next
+
+	async def __aenter__(self): await self.acquire()
+	def __aexit__(self, *err): self.release()
 
 
 # XXX: separate data sources and test types
@@ -367,8 +407,8 @@ class GWC:
 			cache_fn.write_text(json.dumps(data))
 		return data
 
-	st_type = enum.Enum('StationType', [('src', 'Origin'), ('dst', 'Destination')])
 
+	st_type = enum.Enum('StationType', [('src', 'Origin'), ('dst', 'Destination')])
 
 	async def get_station(self, code_raw, t=None):
 		code = code_raw
