@@ -4,13 +4,23 @@ import itertools as it, operator as op, functools as ft
 import datetime as dt
 import os, sys, pathlib, logging, signal, locale, warnings
 import contextlib, inspect, collections, enum, time
-import asyncio, urllib.parse, json, re
+import asyncio, urllib.parse, json, re, random
 
 import aiohttp # http://aiohttp.readthedocs.io
 import aiomysql # http://aiomysql.readthedocs.io
 
 
 class TestConfig:
+
+	# test_match: how to select API to match gtfs data (e.g. trip) against.
+	#  all - query all APIs for match
+	#  any - query one API at random
+	#  first - query APIs until match is found
+	test_match = enum.Enum('TestMatch', 'all any first').any
+	test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
+
+	# test_pick: order in which gtfs data is selected for testing.
+	# test_pick = enum.Enum('tp', 'random random_consistent column?')
 
 	serw_api_url = 'https://api.southeasternrailway.co.uk'
 	serw_crs_nlc_map = None
@@ -29,6 +39,9 @@ class TestConfig:
 
 	debug_http_dir = None
 	debug_cache_dir = None
+
+	def __init__(self):
+		self._debug_files = collections.Counter()
 
 
 class AsyncExitStack:
@@ -159,7 +172,10 @@ popn = lambda v,n: list(v.pop() for m in range(n))
 url_to_fn = lambda p: p.replace('/', '-').replace('.', '_')
 
 
-class RateLimiter:
+class RateSemaphore:
+
+	@classmethod
+	def dummy(cls): return cls(0, 0, 2**30)
 
 	def __init__(self, delay_s2s, delay_e2s=0, max_parallel=1, loop=None):
 		'''Parameters:
@@ -180,22 +196,23 @@ class RateLimiter:
 		while True:
 			delay = self.ts - self.loop.time()
 			if delay <= 0:
-				self.ts += self.delay_s2s - delay
+				self.ts += self.s2s - delay
 				return
 			try: await asyncio.sleep(delay)
 			except asyncio.CancelledError: self.queue.release()
 
 	def release(self):
 		self.queue.release()
-		if self.delay_e2s:
-			ts_next = self.loop.time() + self.delay_e2s
+		if self.e2s:
+			ts_next = self.loop.time() + self.e2s
 			if ts_next > self.ts: self.ts = ts_next
 
+	def locked(self):
+		return self.queue.locked() or self.loop.time() <= self.ts
+
 	async def __aenter__(self): await self.acquire()
-	def __aexit__(self, *err): self.release()
+	async def __aexit__(self, *err): self.release()
 
-
-# XXX: separate data sources and test types
 
 class GWCError(Exception): pass
 class GWCAPIError(GWCError): pass
@@ -330,24 +347,15 @@ class GWCJn:
 		return f'<Jn [{span}] [{trips}]>'
 
 
-class GWC:
+class GWCAPISerw:
 
-	def __init__(self, loop, conf, log):
+	def __init__(self, loop, conf, rate_sem=None):
 		self.loop, self.conf = loop, conf
-		self.log = log or get_logget('gwc.test')
-		self.debug_files = collections.Counter()
+		self.rate_sem = rate_sem or RateSemaphore.dummy()
+		self.log = get_logger('gwc.api.serw')
 
 	async def __aenter__(self):
 		self.ctx = AsyncExitStack()
-
-		# Reset locale for consistency in calendar and such
-		locale_prev = locale.setlocale(locale.LC_ALL, '')
-		self.ctx.callback(locale.setlocale, locale.LC_ALL, locale_prev)
-
-		# Warnings from aiomysql about buffered results and such are all bugs
-		await self.ctx.enter(warnings.catch_warnings())
-		warnings.filterwarnings('error')
-
 		self.http = await self.ctx.enter(
 			aiohttp.ClientSession(headers=self.conf.serw_http_headers) )
 		return self
@@ -370,9 +378,9 @@ class GWC:
 	async def api_call(self, method, p, j=None, headers=None, q=None):
 		self.log.debug('serw-api call: {} {}', method, p)
 		if self.conf.debug_cache_dir:
-			self.debug_files['_req'] += 1
+			self.conf._debug_files['_req'] += 1
 			cache_fn = 'api-cache.{:03d}.{}.{}.json'.format(
-				self.debug_files['_req'], method, url_to_fn(p) )
+				self.conf._debug_files['_req'], method, url_to_fn(p) )
 			cache_fn = self.conf.debug_cache_dir / cache_fn
 			if cache_fn.exists():
 				self.log.debug('serw-api cache-read: {}', cache_fn)
@@ -386,9 +394,10 @@ class GWC:
 				data = await res.json()
 				if self.conf.debug_http_dir:
 					fn = f'api-req.{url_to_fn(p)}.res.{{:03d}}.json'
-					self.debug_files[fn] += 1
+					self.conf._debug_files[fn] += 1
 					with ( self.conf.debug_http_dir /
-						fn.format(self.debug_files[fn]) ).open('w') as dst: json.dump(data, dst)
+							fn.format(self.conf._debug_files[fn]) ).open('w') as dst:
+						json.dump(data, dst)
 				if isinstance(data, dict) and data.get('errors'):
 					err = data['errors']
 					try:
@@ -458,9 +467,91 @@ class GWC:
 		return journeys
 
 
+	def ready(self):
+		return not self.rate_sem.locked()
+
+	async def test_trip(self, trip):
+		async with self.rate_sem:
+			# XXX: fetch corresponding info from api and test against trip
+			src, dst = trip
+			jns = await self.get_journeys(src, dst)
+			print('trip:', trip)
+			print('journeys:', jns)
+			return True
+
+
+class GWCTestRunner:
+	'Fetch trips from mysql at random and test them against specified APIs.'
+
+	def __init__(self, loop, conf, api_list):
+		self.loop, self.conf = loop, conf
+		self.log = get_logger('gwc.test')
+		self.api_list = list(api_list)
+
+	async def __aenter__(self):
+		self.ctx = AsyncExitStack()
+
+		# Reset locale for consistency in calendar and such
+		locale_prev = locale.setlocale(locale.LC_ALL, '')
+		self.ctx.callback(locale.setlocale, locale.LC_ALL, locale_prev)
+
+		# Warnings from aiomysql about buffered results and such are all bugs
+		await self.ctx.enter(warnings.catch_warnings())
+		warnings.filterwarnings('error')
+
+		for n, api_ctx in enumerate(self.api_list):
+			self.api_list[n] = await self.ctx.enter(api_ctx)
+		return self
+
+	async def __aexit__(self, *err):
+		if not self.ctx: return
+		await self.ctx.close()
+		self.ctx = None
+
+
+	async def run_test(self, trip, max_parallel):
+		'''Runs test on random apis with specified
+			max concurrency, preferring ones that are ready first.'''
+		api_list, pending = list(self.api_list), list()
+		random.shuffle(api_list)
+		while api_list or pending:
+			if api_list and len(pending) < max_parallel:
+				api_list.sort(key=op.methodcaller('ready'))
+				while len(pending) < max_parallel:
+					pending.append(self.loop.create_task(api_list.pop().test_trip(trip)))
+			done, pending = await asyncio.wait(
+				pending, return_when=asyncio.FIRST_COMPLETED )
+			for fut in done: yield fut.result()
+
+
 	async def run(self):
-		journeys = await self.get_journeys('SHF', 'LBG')
-		print(journeys)
+		tm, tm_parallel = self.conf.test_match, self.conf.test_match_parallel
+		if tm is tm.any: tm_parallel = 1
+
+		# XXX: loop until some coverage level
+		trip = 'SHF', 'LBG' # XXX: get from gtfs db
+
+		test_result_iter = self.run_test(trip, tm_parallel)
+
+		if tm is tm.all:
+			async for res in test_result_iter:
+				if not res:
+					print('FAIL') # XXX
+					break
+
+		elif tm is tm.first:
+			async for res in test_result_iter:
+				if res: break
+			else: print('FAIL') # XXX
+
+		elif tm is tm.any:
+			async for res in test_result_iter:
+				if not res: print('FAIL') # XXX
+				break
+
+		else: raise ValueError(tm)
+
+		print('SUCCESS')
 
 
 async def run_tests(loop, conf):
@@ -473,8 +564,10 @@ async def run_tests(loop, conf):
 		task.cancel()
 	for sig, code in ('INT', 1), ('TERM', 0):
 		loop.add_signal_handler(getattr(signal, f'SIG{sig}'), ft.partial(sig_handler, sig, code))
-	async with GWC(loop, conf, log) as tester:
-		# XXX: iterate over different test types and counts, run them in some order
+	api_rate_sem = RateSemaphore( conf.rate_interval,
+		conf.rate_min_seq_delay, conf.rate_max_concurrency )
+	api_list = [GWCAPISerw(loop, conf, api_rate_sem)]
+	async with GWCTestRunner(loop, conf, api_list) as tester:
 		try: await tester.run()
 		except asyncio.CancelledError as err: pass
 		# except GWCError as err:
