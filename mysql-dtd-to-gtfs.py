@@ -104,7 +104,7 @@ class NTCursor(pymysql.cursors.SSDictCursor):
 		while True:
 			rows = self.fetchmany(bs)
 			if not rows: break
-			for row in rows: yield row
+			yield from rows
 
 
 class ConversionError(Exception): pass

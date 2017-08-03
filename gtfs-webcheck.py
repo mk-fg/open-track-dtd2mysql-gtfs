@@ -22,6 +22,13 @@ class TestConfig:
 	# test_pick: order in which gtfs data is selected for testing.
 	# test_pick = enum.Enum('tp', 'random random_consistent column?')
 
+	# test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
+	test_train_uids = None
+
+	mysql_db_name = None
+	mysql_conn_opts = dict()
+	mysql_sql_mode = 'strict_all_tables'
+
 	serw_api_url = 'https://api.southeasternrailway.co.uk'
 	serw_crs_nlc_map = None
 	serw_http_headers = {
@@ -152,6 +159,10 @@ class AsyncExitStack:
 				except BaseException as e: result = gen.throw(e)
 		except StopIteration as e: return e.value
 
+async def anext(aiter): # py3.7
+	async for v in aiter: return v
+	raise StopIteration
+
 
 class LogMessage(object):
 	def __init__(self, fmt, a, k): self.fmt, self.a, self.k = fmt, a, k
@@ -168,8 +179,64 @@ class LogStyleAdapter(logging.LoggerAdapter):
 
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
 
+def progress_iter(log, prefix, n_max, steps=30, n=0):
+	'''Returns progress logging coroutine for long calculations.
+		Use e.g. coro.send([result-size={:,}, res_size]) on each iteration.
+		These messages will only be formatted and
+			logged "steps" times, evenly spaced thru n_max iterations.'''
+	steps, ts_start = min(n_max, steps), time.time()
+	step_n = steps and n_max / steps
+	msg_tpl = ( '[{{}}] Step {{:>{0}.0f}}'
+		' / {{:{0}d}} {{:02,.0f}}.{{:02,.0f}}s{{}}' ).format(len(str(steps)))
+	def _progress_iter_coro(n):
+		while True:
+			dn_msg = yield
+			if isinstance(dn_msg, tuple): dn, msg = dn_msg
+			elif isinstance(dn_msg, int): dn, msg = dn_msg, None
+			else: dn, msg = 1, dn_msg
+			n += dn
+			if n == dn or n % step_n < 1:
+				if msg:
+					if not isinstance(msg, str): msg = msg[0].format(*msg[1:])
+					msg = ': {}'.format(msg)
+				ts_delta = time.time() - ts_start
+				ts_delta_est = (n_max - n) / (n / ts_delta)
+				log.debug(msg_tpl, prefix, n / step_n, steps, ts_delta, ts_delta_est, msg or '')
+	coro = _progress_iter_coro(n)
+	next(coro)
+	return coro
+
 popn = lambda v,n: list(v.pop() for m in range(n))
 url_to_fn = lambda p: p.replace('/', '-').replace('.', '_')
+
+
+class NTCursor(aiomysql.cursors.SSDictCursor):
+
+	@staticmethod
+	@ft.lru_cache(maxsize=128)
+	def tuple_for_row(row):
+		if isinstance(row, str): return lambda *a: tuple(a)
+		row = list(k.replace('.', ' ').rsplit(None, 1)[-1] for k in row)
+		return collections.namedtuple('Row', row, rename=True)
+
+	def __init__(self, *args, tuple_type=None, **kws):
+		self._tt = tuple_type
+		super().__init__(*args, **kws)
+
+	def __aiter__(self): return self
+
+	def _conv_row(self, row):
+		if row is None: return
+		return ( self._tt(*row) if self._tt else
+			self.tuple_for_row(tuple(self._fields))(*row) )
+
+	async def fetchall(self, bs=2**15):
+		rows = list()
+		while True:
+			row_chunk = await self.fetchmany(bs)
+			if not row_chunk: break
+			rows.extend(row_chunk)
+		return rows
 
 
 class RateSemaphore:
@@ -499,14 +566,45 @@ class GWCTestRunner:
 		await self.ctx.enter(warnings.catch_warnings())
 		warnings.filterwarnings('error')
 
+		self.db_conns, self.db_cursors = dict(), dict()
+		self.db_pool = await self.ctx.enter(
+			aiomysql.create_pool(charset='utf8mb4', **self.conf.mysql_conn_opts) )
+		self.c = await self.connect()
+		self.db = self.db_conns[None]
+
 		for n, api_ctx in enumerate(self.api_list):
 			self.api_list[n] = await self.ctx.enter(api_ctx)
 		return self
 
 	async def __aexit__(self, *err):
-		if not self.ctx: return
-		await self.ctx.close()
-		self.ctx = None
+		if self.ctx: self.ctx = await self.ctx.close()
+		self.db_conns = self.db_cursors = self.db = self.c = None
+
+
+	async def connect(self, key=None):
+		assert key not in self.db_conns, key
+		conn = self.db_conns[key] = await self.ctx.enter(self.db_pool.acquire())
+		c = self.db_cursors[key] = await self.ctx.enter(conn.cursor(NTCursor))
+		await c.execute('show variables like %s', ['sql_mode'])
+		mode_flags = set(map( str.strip,
+			dict(await c.fetchall())['sql_mode'].lower().split(',') ))
+		mode_flags.update(self.conf.mysql_sql_mode.lower().split())
+		await c.execute('set sql_mode = %s', [','.join(mode_flags)])
+		await c.execute(f'use {self.conf.mysql_db_name}')
+		return c
+
+	async def q(self, q, *params, c='iter'):
+		c = self.db_cursors.get(c) or await self.connect(c)
+		await c.execute(q, params)
+		async for row in c: yield row
+
+	async def qb(self, q, *params, c=None, **kws):
+		c = self.c if not c else (self.db_cursors.get(c) or await self.connect(c))
+		await c.execute(q, params)
+		return await c.fetchall()
+
+	def escape(self, val):
+		return self.db.escape(val)
 
 
 	async def run_test(self, trip, max_parallel):
@@ -524,34 +622,90 @@ class GWCTestRunner:
 			for fut in done: yield fut.result()
 
 
+	async def get_trips(self):
+		train_uid_slice = self.conf.test_train_uids
+		if isinstance(train_uid_slice, int): # XXX: randomize
+			train_uid_slice = f'''
+				JOIN
+					( SELECT trip_headsign AS train_uid
+						FROM trips
+						GROUP BY trip_headsign
+						LIMIT {train_uid_slice} ) r
+					ON r.train_uid = t.trip_headsign'''
+		elif train_uid_slice:
+			train_uid_slice = ','.join(map(self.escape, train_uid_slice))
+			train_uid_slice = f'''
+				JOIN
+					( SELECT trip_headsign AS train_uid
+						FROM trips
+						WHERE train_uid IN ({train_uid_slice})
+						GROUP BY trip_headsign ) r
+					ON r.train_uid = t.trip_headsign'''
+		else: train_uid_slice = ''
+		trip_count = await self.qb(
+			f'SELECT COUNT(*) FROM trips t {train_uid_slice}' )
+		yield trip_count[0][0]
+		trips = self.q(f'''
+			SELECT
+				t.trip_id,
+				t.service_id AS svc_id,
+				st.stop_id AS id,
+				st.stop_sequence AS seq,
+				st.arrival_time AS ts_arr,
+				st.departure_time AS ts_dep
+			FROM trips t
+			{train_uid_slice}
+			LEFT JOIN stop_times st USING(trip_id)
+			ORDER BY t.trip_id, st.stop_sequence''')
+		trip_id, stops = ..., None
+		async for t in trips:
+			if t.trip_id != trip_id:
+				if stops: yield stops
+				trip_id, stops = t.trip_id, [t]
+			else: stops.append(t)
+		yield stops
+
+
+
 	async def run(self):
 		tm, tm_parallel = self.conf.test_match, self.conf.test_match_parallel
 		if tm is tm.any: tm_parallel = 1
 
-		# XXX: loop until some coverage level
-		trip = 'SHF', 'LBG' # XXX: get from gtfs db
+		while True: # XXX: loop until some coverage level
+			# XXX: ordering - pick diff types of schedules, train_uids, etc
 
-		test_result_iter = self.run_test(trip, tm_parallel)
+			trips = self.get_trips()
+			trip_count = await anext(trips)
+			progress = progress_iter(self.log, 'trips', trip_count)
 
-		if tm is tm.all:
-			async for res in test_result_iter:
-				if not res:
-					print('FAIL') # XXX
+			async for stops in trips:
+				t = stops[0]
+				for stop in stops: print(stop)
+			exit() # XXX
+
+			trip = 'SHF', 'LBG' # XXX: get from gtfs db
+
+			test_result_iter = self.run_test(trip, tm_parallel)
+
+			if tm is tm.all:
+				async for res in test_result_iter:
+					if not res:
+						print('FAIL') # XXX
+						break
+
+			elif tm is tm.first:
+				async for res in test_result_iter:
+					if res: break
+				else: print('FAIL') # XXX
+
+			elif tm is tm.any:
+				async for res in test_result_iter:
+					if not res: print('FAIL') # XXX
 					break
 
-		elif tm is tm.first:
-			async for res in test_result_iter:
-				if res: break
-			else: print('FAIL') # XXX
+			else: raise ValueError(tm)
 
-		elif tm is tm.any:
-			async for res in test_result_iter:
-				if not res: print('FAIL') # XXX
-				break
-
-		else: raise ValueError(tm)
-
-		print('SUCCESS')
+			print('SUCCESS')
 
 
 async def run_tests(loop, conf):
@@ -581,7 +735,26 @@ def main(args=None, conf=None):
 	import argparse
 	parser = argparse.ArgumentParser(
 		description='Tool to test gtfs feed (stored in mysql) against online data sources.')
-	# XXX: specify which tests to run and when to stop
+
+	group = parser.add_argument_group('Testing options')
+	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
+		help='Randomly pick specified number of distinct train_uids for testing, ignoring all others.')
+	group.add_argument('--test-train-uid', metavar='uid-list',
+		help='Test entries for specified train_uid only. Multiple values are split by spaces.')
+
+	group = parser.add_argument_group('MySQL db parameters')
+	group.add_argument('-d', '--gtfs-db-name',
+		default='gtfs', metavar='db-name',
+		help='Database name to read GTFS data from (default: %(default)s).')
+	group.add_argument('-f', '--mycnf-file',
+		metavar='path', default=str(pathlib.Path('~/.my.cnf').expanduser()),
+		help='Alternative ~/.my.cnf file to use to read all connection parameters from.'
+			' Parameters there can include: host, port, user, passwd, connect,_timeout.'
+			' Overidden parameters:'
+				' db (specified via --src-cif-db/--dst-gtfs-db options),'
+				' charset=utf8mb4 (for max compatibility).')
+	group.add_argument('-g', '--mycnf-group', metavar='group',
+		help='Name of "[group]" (ini section) in ~/.my.cnf ini file to use parameters from.')
 
 	group = parser.add_argument_group('Extra data sources')
 	group.add_argument('--serw-crs-nlc-csv',
@@ -626,6 +799,16 @@ def main(args=None, conf=None):
 				for n, line in lines_warn:
 					log.warning('Failed to process "crs,nlc" csv line: {!r} [{}]', line, n)
 		conf.serw_crs_nlc_map = crs_nlc_map
+
+	conf.mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
+		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
+	conf.mysql_db_name = opts.gtfs_db_name
+
+	if opts.test_train_uid:
+		conf.test_train_uids = opts.test_train_uid.split()
+		if opts.test_train_limit:
+			conf.test_train_uids = conf.test_train_uids[:opts.test_train_limit]
+	else: conf.test_train_uids = opts.test_train_limit
 
 	if opts.debug_http_dir: conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
 	if opts.debug_cache_dir: conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
