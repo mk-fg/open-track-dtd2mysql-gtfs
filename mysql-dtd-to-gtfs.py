@@ -859,6 +859,15 @@ class DTDtoGTFS:
 			for assoc in filter(None, trains_assoc):
 				for n, train_uid in enumerate([assoc.base, assoc.assoc]):
 					assoc_map[train_uid][n].append(assoc)
+
+		# Sanity check: make sure train_uid doesn't appear
+		#  in both base_uid and assoc_uid on the same days.
+		# Handling such cases would require more complex logic
+		for train_uid, (assocs_base, assocs) in assoc_map.items():
+			if not (assocs_base and assocs): continue
+			for assoc1, assoc2 in it.product(assocs_base, assocs):
+				assert not assoc1.cal.intersection(assoc2.cal), [train_uid, assoc1, assoc2]
+
 		return assoc_map
 
 	def apply_associations(self, schedule_sets):
@@ -872,9 +881,6 @@ class DTDtoGTFS:
 		self.log.debug('Processing schedules without associations...')
 		for ss in schedule_sets:
 			assocs_base, assocs = assoc_map[ss.train_uid]
-			# Sanity check: train_uid can be either used as base_uid or assoc_uid,
-			#  but not both, as that'd need more complex assoc graph processing.
-			assert not (assocs_base and assocs), ss.train_uid
 			if assocs_base:
 				for assoc, sched in it.product(assocs_base, ss.sched_list):
 					assoc_cal = assoc.cal_base.intersection(sched.cal)
