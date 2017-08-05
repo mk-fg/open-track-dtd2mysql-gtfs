@@ -1,67 +1,85 @@
-date: 2017-07-09T04:20:19+05:00
-git: d1ad873
+date: 2017-08-05T22:25:21+05:00
+git: dd2bf6f
 pypy3: [PyPy 5.8.0-beta0 with GCC 7.1.1 20170528]
 
-% time ./mysql-dtd-to-gtfs.py --debug --dst-gtfs-schema -d gtfs_py_full
-2017-07-09 04:00:26 :: dtd2gtfs DEBUG :: Initializing gtfs database (name=gtfs_py_full, memory-engine=False) tables...
-2017-07-09 04:00:31 :: dtd2gtfs DEBUG :: Populating gtfs.stops table...
-2017-07-09 04:00:32 :: dtd2gtfs DEBUG :: Populating gtfs.transfers table...
-2017-07-09 04:00:33 :: dtd2gtfs DEBUG :: Fetching cif.schedule entries (test-train-limit=None)...
-2017-07-09 04:01:33 :: dtd2gtfs DEBUG :: Processing 244973 cif.schedule entries...
-2017-07-09 04:01:35 :: dtd2gtfs DEBUG :: [schedules] Step  0 / 30 02.545,396s: trips=0
-2017-07-09 04:02:18 :: dtd2gtfs DEBUG :: [schedules] Step  1 / 30 45.1,295s: trips=5,670
-2017-07-09 04:02:54 :: dtd2gtfs DEBUG :: [schedules] Step  2 / 30 81.1,129s: trips=11,409
-2017-07-09 04:03:28 :: dtd2gtfs DEBUG :: [schedules] Step  3 / 30 114.1,030s: trips=18,210
-2017-07-09 04:03:54 :: dtd2gtfs DEBUG :: [schedules] Step  4 / 30 141.915s: trips=22,604
-2017-07-09 04:04:28 :: dtd2gtfs DEBUG :: [schedules] Step  5 / 30 175.874s: trips=27,648
-2017-07-09 04:05:19 :: dtd2gtfs DEBUG :: [schedules] Step  6 / 30 226.905s: trips=33,733
-2017-07-09 04:05:59 :: dtd2gtfs DEBUG :: [schedules] Step  7 / 30 266.875s: trips=40,003
-2017-07-09 04:06:32 :: dtd2gtfs DEBUG :: [schedules] Step  8 / 30 299.823s: trips=46,625
-2017-07-09 04:07:03 :: dtd2gtfs DEBUG :: [schedules] Step  9 / 30 330.770s: trips=54,337
-2017-07-09 04:07:43 :: dtd2gtfs DEBUG :: [schedules] Step 10 / 30 370.739s: trips=60,785
-2017-07-09 04:08:26 :: dtd2gtfs DEBUG :: [schedules] Step 11 / 30 413.714s: trips=67,472
-2017-07-09 04:09:08 :: dtd2gtfs DEBUG :: [schedules] Step 12 / 30 454.682s: trips=74,414
-2017-07-09 04:09:38 :: dtd2gtfs DEBUG :: [schedules] Step 13 / 30 485.634s: trips=80,380
-2017-07-09 04:10:10 :: dtd2gtfs DEBUG :: [schedules] Step 14 / 30 517.590s: trips=86,347
-2017-07-09 04:10:52 :: dtd2gtfs DEBUG :: [schedules] Step 15 / 30 558.558s: trips=92,811
-2017-07-09 04:11:27 :: dtd2gtfs DEBUG :: [schedules] Step 16 / 30 594.519s: trips=98,684
-2017-07-09 04:12:00 :: dtd2gtfs DEBUG :: [schedules] Step 17 / 30 626.479s: trips=106,506
-2017-07-09 04:12:28 :: dtd2gtfs DEBUG :: [schedules] Step 18 / 30 655.436s: trips=114,419
-2017-07-09 04:12:57 :: dtd2gtfs DEBUG :: [schedules] Step 19 / 30 684.396s: trips=118,419
-2017-07-09 04:13:27 :: dtd2gtfs DEBUG :: [schedules] Step 20 / 30 714.357s: trips=122,751
-2017-07-09 04:14:02 :: dtd2gtfs DEBUG :: [schedules] Step 21 / 30 749.321s: trips=127,123
-2017-07-09 04:14:40 :: dtd2gtfs DEBUG :: [schedules] Step 22 / 30 787.286s: trips=132,695
-2017-07-09 04:15:12 :: dtd2gtfs DEBUG :: [schedules] Step 23 / 30 819.249s: trips=136,799
-2017-07-09 04:15:42 :: dtd2gtfs DEBUG :: [schedules] Step 24 / 30 849.212s: trips=144,811
-2017-07-09 04:16:20 :: dtd2gtfs DEBUG :: [schedules] Step 25 / 30 886.177s: trips=151,479
-2017-07-09 04:17:01 :: dtd2gtfs DEBUG :: [schedules] Step 26 / 30 928.143s: trips=157,937
-2017-07-09 04:17:13 :: dtd2gtfs DEBUG :: Merging service timespans for 160276 gtfs.trips...
-2017-07-09 04:17:41 :: dtd2gtfs DEBUG :: Updating service_id in gtfs.trips table...
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi] Stats:
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   sched-count: 214,874
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   sched-entry-N: 63,848
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   sched-entry-O: 76,871
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   sched-entry-P: 74,155
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   span-empty-sched: 9,951
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   span-overlay-part: 8,208
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   span-overlay-split: 29,530
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   span-overlay-total: 60
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   svc-count: 3,627
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   svc-dedup: 159,681
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   svc-except-days: 15,617
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   svc-merge: 34,192
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   svc-merge-op: 70,545
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   svc-merge-op-bridge: 55,262
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   svc-merge-op-inc_diff_weekdays: 3,902
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   svc-merge-op-overlap: 11,381
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   train-count: 128,842
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   train-override-median: 1.1
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   train-with-override: 85,020
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   trip-count: 160,276
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   trip-dedup: 44,647
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   trip-overlay: 37,473
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   trip-overlay-noop: 54,731
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   trip-row-dup: 2,590
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   trip-row-dup-op: 3,032
-2017-07-09 04:19:03 :: dtd2gtfs DEBUG :: [ALi]   trip-spans-1: 157,686
-./mysql-dtd-to-gtfs.py --debug --dst-gtfs-schema -d gtfs_py_full  426.50s user 119.43s system 48% cpu 18:38.20 total
+% time ./mysql-dtd-to-gtfs.py --debug -i -s cif_499 -d gtfs_py_full
+2017-08-05 22:25:21 :: dtd2gtfs DEBUG :: Initializing gtfs database (name=gtfs_py_full, memory-engine=False) tables...
+2017-08-05 22:25:21 :: dtd2gtfs DEBUG :: Populating gtfs.stops table...
+2017-08-05 22:25:21 :: dtd2gtfs DEBUG :: Populating gtfs.transfers table...
+2017-08-05 22:25:21 :: dtd2gtfs DEBUG :: Constructing train association map...
+2017-08-05 22:25:23 :: dtd2gtfs DEBUG :: Processing schedules without associations...
+2017-08-05 22:25:23 :: dtd2gtfs DEBUG :: Schedule counts: regular=369,908, z=19,020
+2017-08-05 22:25:23 :: dtd2gtfs DEBUG :: Processing 388,928 cif.schedule entries...
+2017-08-05 22:25:23 :: dtd2gtfs DEBUG :: Fetching cif.schedule entries (count=369,908)...
+2017-08-05 22:26:13 :: dtd2gtfs DEBUG :: [schedules] Step  0 / 30 50.19,494,851s
+2017-08-05 22:26:52 :: dtd2gtfs DEBUG :: [schedules] Step  1 / 30 89.2,580s
+2017-08-05 22:27:47 :: dtd2gtfs DEBUG :: [schedules] Step  2 / 30 144.2,011s
+2017-08-05 22:28:37 :: dtd2gtfs DEBUG :: [schedules] Step  3 / 30 194.1,742s
+2017-08-05 22:29:28 :: dtd2gtfs DEBUG :: [schedules] Step  4 / 30 245.1,590s
+2017-08-05 22:30:00 :: dtd2gtfs DEBUG :: [schedules] Step  5 / 30 277.1,382s
+2017-08-05 22:30:31 :: dtd2gtfs DEBUG :: [schedules] Step  6 / 30 308.1,231s
+2017-08-05 22:31:32 :: dtd2gtfs DEBUG :: [schedules] Step  7 / 30 368.1,210s
+2017-08-05 22:32:45 :: dtd2gtfs DEBUG :: [schedules] Step  8 / 30 442.1,215s
+2017-08-05 22:33:50 :: dtd2gtfs DEBUG :: [schedules] Step  9 / 30 507.1,183s
+2017-08-05 22:34:46 :: dtd2gtfs DEBUG :: [schedules] Step 10 / 30 563.1,125s
+2017-08-05 22:35:29 :: dtd2gtfs DEBUG :: [schedules] Step 11 / 30 606.1,046s
+2017-08-05 22:36:11 :: dtd2gtfs DEBUG :: [schedules] Step 12 / 30 648.972s
+2017-08-05 22:36:59 :: dtd2gtfs DEBUG :: [schedules] Step 13 / 30 696.910s
+2017-08-05 22:37:55 :: dtd2gtfs DEBUG :: [schedules] Step 14 / 30 752.860s
+2017-08-05 22:38:46 :: dtd2gtfs DEBUG :: [schedules] Step 15 / 30 802.802s
+2017-08-05 22:39:22 :: dtd2gtfs DEBUG :: [schedules] Step 16 / 30 838.734s
+2017-08-05 22:40:06 :: dtd2gtfs DEBUG :: [schedules] Step 17 / 30 883.675s
+2017-08-05 22:41:08 :: dtd2gtfs DEBUG :: [schedules] Step 18 / 30 945.630s
+2017-08-05 22:42:04 :: dtd2gtfs DEBUG :: [schedules] Step 19 / 30 1,001.579s
+2017-08-05 22:42:58 :: dtd2gtfs DEBUG :: [schedules] Step 20 / 30 1,054.527s
+2017-08-05 22:43:45 :: dtd2gtfs DEBUG :: [schedules] Step 21 / 30 1,102.472s
+2017-08-05 22:44:41 :: dtd2gtfs DEBUG :: [schedules] Step 22 / 30 1,158.421s
+2017-08-05 22:45:41 :: dtd2gtfs DEBUG :: [schedules] Step 23 / 30 1,218.371s
+2017-08-05 22:46:26 :: dtd2gtfs DEBUG :: [schedules] Step 24 / 30 1,262.316s
+2017-08-05 22:47:29 :: dtd2gtfs DEBUG :: [schedules] Step 25 / 30 1,326.265s
+2017-08-05 22:48:18 :: dtd2gtfs DEBUG :: [schedules] Step 26 / 30 1,375.212s
+2017-08-05 22:49:18 :: dtd2gtfs DEBUG :: [schedules] Step 27 / 30 1,435.159s
+2017-08-05 22:50:09 :: dtd2gtfs DEBUG :: [schedules] Step 28 / 30 1,486.106s
+2017-08-05 22:50:30 :: dtd2gtfs DEBUG :: Fetching cif.z_schedule entries (count=19,020)...
+2017-08-05 22:51:09 :: dtd2gtfs DEBUG :: [schedules] Step 29 / 30 1,546.53s
+2017-08-05 22:52:15 :: dtd2gtfs DEBUG :: [schedules] Step 30 / 30 1,612.00s
+2017-08-05 22:52:16 :: dtd2gtfs DEBUG :: Applying 1,054 association info(s) (splits/joins) to 2,500 schedule(s)...
+2017-08-05 22:52:32 :: dtd2gtfs DEBUG :: Merging service calendars for 293169 gtfs.trips...
+2017-08-05 22:53:11 :: dtd2gtfs DEBUG :: Updating service_id in gtfs.trips table...
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC] Stats:
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   assoc-quirk-no_base: 22
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   assoc-quirk-orig_days: 1
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   assoc-type-join: 1,184
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   assoc-type-null: 898
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   assoc-type-split: 1,417
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   sched-count: 388,928
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   sched-count-z: 19,020
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   sched-entry-C: 36,224
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   sched-entry-N: 82,197
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   sched-entry-O: 97,243
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   sched-entry-P: 173,264
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   sched-quirk-arr-dep-mismatch: 3
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   sched-without-stops: 56
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-count: 4,736
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-dedup: 297,905
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-diff-exc: 124,255
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-diff-full: 385
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-diff-move: 8,380
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-diff-op: 133,490
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-diff-split: 470
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-except-days: 24,870
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-merge: 27,396
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-merge-op: 50,110
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-merge-op-bridge: 35,643
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-merge-op-inc_diff_weekdays: 3,794
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   svc-merge-op-overlap: 10,673
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   train-count: 219,951
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   train-override-median: 1.0
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   train-with-override: 121,972
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   trip-count: 293,169
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   trip-dedup: 59,189
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   trip-no-stops: 2
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   trip-row-dup: 6,133
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   trip-row-dup-op: 9,472
+2017-08-05 22:56:00 :: dtd2gtfs DEBUG :: [TwC]   trip-spans-1: 287,036
+./mysql-dtd-to-gtfs.py --debug -s cif_499 -d gtfs_py_full 618.54s user 221.47s system 45% cpu 30:40.27 total
