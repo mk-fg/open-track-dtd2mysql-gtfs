@@ -28,6 +28,8 @@ class TestConfig:
 	# XXX: negative tests - specifically pick bank holidays and exception days
 	test_trip_days = 7
 	test_trip_embark_delay = dt.timedelta(seconds=20*60)
+	test_trip_journeys = 3 # should be high enough for testee direct trip to be there
+	test_trip_time_slack = 5*60 # max diff in stop times
 
 	mysql_db_name = None
 	mysql_conn_opts = dict()
@@ -41,8 +43,9 @@ class TestConfig:
 		'Origin': 'https://ticket.southeasternrailway.co.uk',
 		'x-access-token':
 			'otrl|a6af56be1691ac2929898c9f68c4b49a0a2d930849770dba976be5d792a',
-		# 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:54.0) Gecko/20100101 Firefox/54.0',
+		'User-Agent': 'gtfs-webcheck/1.0 (+https://github.com/mk-fg/open-track-dtd2mysql-gtfs/)',
 	}
+	serw_error_skip = {('Warning', 'IptisNrsError')} # IPTIS is related to fares?
 
 	rate_interval = 3 # seconds
 	rate_max_concurrency = 1
@@ -362,6 +365,11 @@ class GWCAPIError(GWCError): pass
 class GWCAPIErrorCode(GWCAPIError): pass
 
 class GWCTestFail(Exception): pass
+class GWCTestFailNoJourney(GWCTestFail): pass
+class GWCTestFailStopNotFound(GWCTestFail): pass
+class GWCTestFailStopMismatch(GWCTestFail): pass
+
+GWCTestResult = collections.namedtuple('GWCTestResult', 'success exc')
 
 
 class GWCTripStop:
@@ -383,12 +391,15 @@ class GWCTrip:
 		embark_flags = dict(
 			Normal=(True, True), Passing=(False, False),
 			PickUpOnly=(True, False), SetDownOnly=(False, True) )
-		src, dst, trip_stops = sig.src, sig.dst, list()
+		src, dst, trip_stops, ts0 = sig.src, sig.dst, list(), None
 		for stop in stops:
 			stop_info = links[stop['station']]
 			pickup, dropoff = embark_flags[stop['pattern']]
 			ts = ( None if not (pickup or dropoff) else
 				dt.datetime.strptime(stop['time']['scheduledTime'], '%Y-%m-%dT%H:%M:%S') )
+			if ts:
+				if not ts0: ts0 = dt.datetime(ts.year, ts.month, ts.day)
+				ts -= ts0
 			name, crs, nlc, lat, lon = op.itemgetter(
 				'name', 'crs', 'nlc', 'latitude', 'longitude' )(stop_info)
 			if src and src != crs: continue
@@ -400,7 +411,7 @@ class GWCTrip:
 	@classmethod
 	def from_gtfs_stops(cls, train_uid, stops, ts_src=None):
 		trip_stops = list(GWCTripStop( s.stop_id,
-			s.arrival_time, s.pickup_type, s.drop_off_type ) for s in stops)
+			s.departure_time, s.pickup_type, s.drop_off_type ) for s in stops)
 		return cls(train_uid, trip_stops, ts_src)
 
 	def __init__(self, train_uid, stops, ts_start=None, ts_end=None):
@@ -538,6 +549,18 @@ class GWCAPISerw:
 		if data is ...: return json.loads(fn.read_text()) if fn.exists() else None
 		with fn.open('w') as dst: json.dump(data, dst, **json_pretty)
 
+	def _api_error_check(self, data):
+		if isinstance(data, dict) and data.get('errors'):
+			err = data['errors']
+			try:
+				err, = err
+				err = err.get('failureType'), err['errorCode']
+			except: raise GWCAPIError(res.status, err)
+			if err not in serw_error_skip:
+				raise GWCAPIErrorCode(res.status, *err)
+		elif isinstance(data, dict) and 'result' not in data:
+			raise GWCAPIError(res.status, f'no "result" key in data - {data!r}')
+
 	def api_url(self, p, **q):
 		if not re.search('^(https?|ws):', p):
 			url = f'{self.conf.serw_api_url}/{p.lstrip("/")}'
@@ -572,17 +595,7 @@ class GWCAPISerw:
 					raise GWCAPIError(res.status, f'non-json response - {data!r}')
 				data = await res.json()
 				self._api_cache(f'api-req.{url_to_fn(p)}.res.{{:03d}}.json', data)
-
-				if isinstance(data, dict) and data.get('errors'):
-					err = data['errors']
-					try:
-						err, = err
-						err = err['errorCode'], err.get('failureType')
-					except (TypeError, ValueError, IndexError):
-						raise GWCAPIError(res.status, err)
-					else: raise GWCAPIErrorCode(res.status, *err)
-				elif isinstance(data, dict) and 'result' not in data:
-					raise GWCAPIError(res.status, f'no "result" key in data - {data!r}')
+				self._api_error_check(data)
 				if res.status != 200: raise GWCAPIError(res.status, 'non-200 response status')
 
 		except aiohttp.ClientError as err:
@@ -633,7 +646,7 @@ class GWCAPISerw:
 		jp_res = await self.api_call( 'post', 'jp/journey-plan',
 			dict( origin=src, destination=dst,
 				outward=dict(rangeStart=ts_start, rangeEnd=ts_end, arriveDepart='Depart'),
-				numJourneys=3, adults=1, children=0,
+				numJourneys=self.conf.test_trip_journeys, adults=1, children=0,
 				openReturn=False, disableGroupSavings=True, showCheapest=False, doRealTime=False ) )
 		jp_urls = list(
 			urllib.parse.unquote_plus(res['journey'])
@@ -654,10 +667,26 @@ class GWCAPISerw:
 		async with self.rate_sem:
 			src, dst = (trip.stops[n].crs for n in [0, -1])
 			jns = await self.get_journeys(src, dst, ts_dep=(trip.ts_start, trip.ts_end))
-			print('trip:', trip)
-			print('journeys:', jns)
-			die()
-			return True
+
+			## Find one-direct-trip journey with matching train_uid
+			for jn in jns:
+				if len(jn.trips) > 1: continue
+				jn_trip = jn.trips[0]
+				if jn_trip.train_uid != trip.train_uid: continue
+				break
+			else: raise GWCTestFailNoJourney(trip, jns)
+
+			## Match all stops/stop-times
+			# SERW API returns non-public stops, which are missing in gtfs
+			trip_stops = iter(trip.stops)
+			for st1 in trip.stops:
+				for st2 in jn_trip.stops:
+					if st1.crs == st2.crs: break
+				else: raise GWCTestFailStopNotFound(trip, jn_trip, st1)
+				ts_diff = abs(st1.ts.total_seconds() - st2.ts.total_seconds())
+				if ts_diff > self.conf.test_trip_time_slack:
+					raise GWCTestFailStopMismatch( trip, jn_trip,
+						st1.crs, (st1.ts, st2.ts), (ts_diff, self.conf.test_trip_time_slack) )
 
 
 class GWCTestRunner:
@@ -733,7 +762,9 @@ class GWCTestRunner:
 						pending.append(self.loop.create_task(api_list.pop().test_trip(trip)))
 				done, pending = await asyncio.wait(
 					pending, return_when=asyncio.FIRST_COMPLETED )
-				for fut in done: yield fut.result()
+				for fut in done:
+					exc = fut.exception()
+					yield GWCTestResult(not exc, exc)
 		finally:
 			for task in pending:
 				task.cancel()
@@ -746,17 +777,17 @@ class GWCTestRunner:
 		test_result_iter = self._run_test(trip, tm_parallel)
 		if tm is tm.all:
 			async for res in test_result_iter:
-				if not res:
-					raise GWCTestFail(trip)
-					break
-		elif tm is tm.first:
-			async for res in test_result_iter:
-				if res: break
-			else: raise GWCTestFail(trip)
+				if not res.success: raise res.exc
 		elif tm is tm.any:
 			async for res in test_result_iter:
-				if not res: raise GWCTestFail(trip)
+				if not res.success: raise res.exc
 				break
+		elif tm is tm.first:
+			err_list = list()
+			async for res in test_result_iter:
+				if res.success: break
+				err_list.append(res.exc)
+			else: raise GWCTestFail(err_list)
 		else: raise ValueError(tm)
 
 
@@ -802,61 +833,65 @@ class GWCTestRunner:
 		ts = dt.datetime.now()
 		date_current, time_current = ts.date(), ts.time()
 
-		while True: # XXX: loop until some coverage level
-			# XXX: ordering - pick diff types of schedules, train_uids, etc
+		# XXX: loop until some coverage level
+		# XXX: ordering - pick diff types of schedules, train_uids, etc
 
-			trips = self.get_trips()
-			trip_count = await anext(trips)
-			progress = progress_iter(self.log, 'trips', trip_count)
+		trips = self.get_trips()
+		trip_count = await anext(trips)
+		progress = progress_iter(self.log, 'trips', trip_count)
 
-			async for stops in trips:
-				train_uid, service_id = op.attrgetter('trip_headsign', 'service_id')(stops[0])
+		async for stops in trips:
+			train_uid, service_id = op.attrgetter('trip_headsign', 'service_id')(stops[0])
 
-				test_stops, buff = list(), list()
-				for s in stops:
-					if not test_stops:
-						if s.pickup_type == GTFSEmbarkType.none: continue
-						test_stops.append(s)
-					else:
-						buff.append(s)
-						if s.drop_off_type == GTFSEmbarkType.none: continue
-						test_stops.extend(buff)
-						buff.clear()
-				if len(test_stops) < 2:
-					stats['trip-skip-no-public-stops'] += 1
-					continue
-				time0 = dts_to_dt(test_stops[0].departure_time)
-				trip = GWCTrip.from_gtfs_stops(train_uid, test_stops)
+			# Find first/last public pickup/dropoff stops for a trip
+			test_stops, buff = list(), list()
+			for s in stops:
+				if not test_stops:
+					if s.pickup_type == GTFSEmbarkType.none: continue
+					test_stops.append(s)
+				else:
+					buff.append(s)
+					if s.drop_off_type == GTFSEmbarkType.none: continue
+					test_stops.extend(buff)
+					buff.clear()
+			if len(test_stops) < 2:
+				stats['trip-skip-no-public-stops'] += 1
+				continue
+			time0 = dts_to_dt(test_stops[0].departure_time)
+			trip = GWCTrip.from_gtfs_stops(train_uid, test_stops)
 
-				dates = await self.qb(f'''
-					SELECT
-						service_id AS id, start_date AS a, end_date AS b,
-						CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS weekdays,
-						date, exception_type AS exc
-					FROM calendar c
-					LEFT JOIN calendar_dates cd USING(service_id)
-					WHERE service_id = %s''', service_id)
-				svc = dates[0]
-				dates = list() if svc.date is None else [svc, *dates]
-				dates, exc_dates = (
-					set(row.date for row in dates if row.exc == GTFSExceptionType.added),
-					set(row.date for row in dates if row.exc == GTFSExceptionType.removed) )
-				span = Timespan(svc.a, svc.b, tuple(map(int, svc.weekdays)), exc_dates)
-				dates.update(span.date_iter())
-				dates = list(it.dropwhile(lambda date: not ( date > date_current
-					or (date == date_current and time0 > time_current) ), sorted(dates)))
-				dates = dates[:self.conf.test_trip_days]
-				if not dates:
-					stats['trip-skip-past'] += 1
-					continue
+			# Build list of future service dates for a trip, limited by test_trip_days
+			dates = await self.qb(f'''
+				SELECT
+					service_id AS id, start_date AS a, end_date AS b,
+					CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS weekdays,
+					date, exception_type AS exc
+				FROM calendar c
+				LEFT JOIN calendar_dates cd USING(service_id)
+				WHERE service_id = %s''', service_id)
+			svc = dates[0]
+			dates = list() if svc.date is None else [svc, *dates]
+			dates, exc_dates = (
+				set(row.date for row in dates if row.exc == GTFSExceptionType.added),
+				set(row.date for row in dates if row.exc == GTFSExceptionType.removed) )
+			span = Timespan(svc.a, svc.b, tuple(map(int, svc.weekdays)), exc_dates)
+			dates.update(span.date_iter())
+			dates = list(it.dropwhile(lambda date: not ( date > date_current
+				or (date == date_current and time0 > time_current) ), sorted(dates)))
+			dates = dates[:self.conf.test_trip_days]
+			if not dates:
+				stats['trip-skip-past'] += 1
+				continue
 
-				for date in dates:
-					ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
-					await self.run_test(trip, ts_start=ts_src) # XXX: nice repr for failures
+			# Run the tests
+			for date in dates:
+				ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
+				await self.run_test(trip, ts_start=ts_src) # XXX: nice repr for failures
 
-		log_lines(self.log.debug, ['Stats:', *(
-			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
-			for k,v in sorted(stats.items()) )])
+		if stats:
+			log_lines(self.log.debug, ['Stats:', *(
+				'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
+				for k,v in sorted(stats.items()) )])
 
 
 async def run_tests(loop, conf):
