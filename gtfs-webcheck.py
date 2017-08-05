@@ -4,7 +4,7 @@ import itertools as it, operator as op, functools as ft
 import datetime as dt
 import os, sys, pathlib, logging, signal, locale, warnings
 import contextlib, inspect, collections, enum, time
-import asyncio, urllib.parse, json, re, random
+import asyncio, urllib.parse, json, re, random, secrets
 
 import aiohttp # http://aiohttp.readthedocs.io
 import aiomysql # http://aiomysql.readthedocs.io
@@ -24,6 +24,10 @@ class TestConfig:
 
 	# test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
 	test_train_uids = None
+
+	# XXX: negative tests - specifically pick bank holidays and exception days
+	test_trip_days = 7
+	test_trip_embark_delay = dt.timedelta(seconds=20*60)
 
 	mysql_db_name = None
 	mysql_conn_opts = dict()
@@ -177,7 +181,18 @@ class LogStyleAdapter(logging.LoggerAdapter):
 		msg, kws = self.process(msg, kws)
 		self.logger._log(level, LogMessage(msg, args, kws), (), log_kws)
 
+def log_lines(log_func, lines, log_func_last=False):
+	if isinstance(lines, str):
+		lines = list(line.rstrip() for line in lines.rstrip().split('\n'))
+	uid = secrets.token_urlsafe(3)
+	for n, line in enumerate(lines, 1):
+		if isinstance(line, str): line = '[{}] {}', uid, line
+		else: line = ['[{}] {}'.format(uid, line[0])] + list(line[1:])
+		if log_func_last and n == len(lines): log_func_last(*line)
+		else: log_func(*line)
+
 get_logger = lambda name: LogStyleAdapter(logging.getLogger(name))
+
 
 def progress_iter(log, prefix, n_max, steps=30, n=0):
 	'''Returns progress logging coroutine for long calculations.
@@ -206,8 +221,18 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 	next(coro)
 	return coro
 
+def iter_range(a, b, step):
+	if a > b: step = -step
+	v = a
+	while True:
+		yield v
+		if v == b: break
+		v += step
+
 popn = lambda v,n: list(v.pop() for m in range(n))
 url_to_fn = lambda p: p.replace('/', '-').replace('.', '_')
+json_pretty = dict(sort_keys=True, indent=2, separators=(',', ': '))
+def die(): raise RuntimeError
 
 
 class NTCursor(aiomysql.cursors.SSDictCursor):
@@ -281,21 +306,73 @@ class RateSemaphore:
 	async def __aexit__(self, *err): self.release()
 
 
+class TimespanEmpty(Exception): pass
+
+class Timespan:
+
+	one_day = dt.timedelta(days=1)
+	weekday_order = 'monday tuesday wednesday thursday friday saturday sunday'.split()
+
+	def __init__(self, start, end, weekdays=[1]*7, except_days=None):
+		self.start, self.end, self.except_days = start, end, set(except_days or list())
+		if isinstance(weekdays, dict): weekdays = (weekdays[k] for k in self.weekday_order)
+		self.weekdays = tuple(map(int, weekdays))
+		try: self.start, self.end = next(self.date_iter()), next(self.date_iter(reverse=True))
+		except StopIteration: raise TimespanEmpty(str(self)) from None
+		self.except_days = frozenset(filter(
+			( lambda day: self.start <= day <= self.end
+				and self.weekdays[day.weekday()] ), self.except_days ))
+
+	def __repr__(self):
+		weekdays = ''.join((str(n) if d else '.') for n,d in enumerate(self.weekdays, 1))
+		except_days = ', '.join(sorted(map(str, self.except_days)))
+		return f'<TS {weekdays} [{self.start} {self.end}] {{{except_days}}}>'
+
+	@property
+	def weekday_dict(self): return dict(zip(self.weekday_order, self.weekdays))
+
+	@classmethod
+	def date_range(cls, a, b, weekdays=None, except_days=None, reverse=False):
+		if a > b: return
+		if reverse: a, b = b, a
+		svc_day_check = ( lambda day, wd=weekdays or [1]*7,
+			ed=except_days or set(): wd[day.weekday()] and day not in ed )
+		for day in filter(svc_day_check, iter_range(a, b, cls.one_day)): yield day
+
+	def date_iter(self, reverse=False, start=None):
+		return self.date_range( start or self.start, self.end,
+			self.weekdays, self.except_days, reverse=reverse )
+
+GTFSEmbarkType = enum.IntEnum('EmbarkType', 'regular none phone driver', start=0)
+GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
+
+def dts_to_dt(dts, date=None):
+	if isinstance(dts, dt.timedelta): dts = dts.total_seconds()
+	if isinstance(dts, dt.datetime):
+		dts = dts.time()
+		dts = dts.hour * 3600 + dts.minute * 60 + dts.second
+	dts = int(dts)
+	ts = dt.time(dts // 3600, (dts % 3600) // 60, dts % 60, dts % 1)
+	if date: ts = dt.datetime.combine(date, ts)
+	return ts
+
+
 class GWCError(Exception): pass
 class GWCAPIError(GWCError): pass
 class GWCAPIErrorCode(GWCAPIError): pass
 
+class GWCTestFail(Exception): pass
+
 
 class GWCTripStop:
 
-	def __init__(self, crs, nlc, ts, pickup, dropoff, **meta):
-		self.crs, self.nlc, self.ts, self.pickup, self.dropoff = crs, nlc, ts, pickup, dropoff
-		self.meta = meta
+	def __init__(self, crs, ts, pickup, dropoff, **meta):
+		self.crs, self.ts, self.pickup, self.dropoff, self.meta = crs, ts, pickup, dropoff, meta
 
 	def __repr__(self):
 		embark = '-P'[bool(self.pickup)] + '-D'[bool(self.dropoff)]
 		ts = self.ts.strftime('%H:%M') if self.ts else 'x'
-		return f'<TS {self.crs} {self.nlc} {embark} {ts}>'
+		return f'<TS {self.crs} {self.meta.get("nlc", "x")} {embark} {ts}>'
 
 class GWCTrip:
 
@@ -316,17 +393,37 @@ class GWCTrip:
 				'name', 'crs', 'nlc', 'latitude', 'longitude' )(stop_info)
 			if src and src != crs: continue
 			src = trip_stops.append(GWCTripStop(
-				crs, nlc, ts, pickup, dropoff, name=name, lat=lat, lon=lon ))
+				crs, ts, pickup, dropoff, name=name, nlc=nlc, lat=lat, lon=lon ))
 			if dst == crs: break
-		return cls(sig.train_uid, sig.ts_src, trip_stops)
+		return cls(sig.train_uid, trip_stops, sig.ts_src)
 
-	def __init__(self, train_uid, ts_start, stops):
-		self.train_uid, self.ts_start, self.stops = train_uid, ts_start, stops
+	@classmethod
+	def from_gtfs_stops(cls, train_uid, stops, ts_src=None):
+		trip_stops = list(GWCTripStop( s.stop_id,
+			s.arrival_time, s.pickup_type, s.drop_off_type ) for s in stops)
+		return cls(train_uid, trip_stops, ts_src)
+
+	def __init__(self, train_uid, stops, ts_start=None, ts_end=None):
+		self.train_uid, self.stops = train_uid, stops
+		if stops and (ts_start or ts_end):
+			if not ts_start:
+				ts_start = dts_to_dt(stops[0].ts, ts_end.date())
+				while ts_start >= ts_end: ts_start -= dt.timedelta(days=1)
+			if not ts_end:
+				ts_end = dts_to_dt(stops[-1].ts, ts_start.date())
+				while ts_end <= ts_start: ts_end += dt.timedelta(days=1)
+		self.ts_start, self.ts_end = ts_start, ts_end
 
 	def __repr__(self):
 		return (
-			f'<Trip {self.train_uid} [{self.ts_start}]'
+			f'<Trip {self.train_uid}'
+				f' [{self.ts_start or "-"} {self.ts_end or "-"}]'
 				f' [{" - ".join(ts.crs for ts in self.stops)}]>' )
+
+	def copy(self, **kws):
+		state = dict((k, getattr(self, k)) for k in 'train_uid ts_start stops'.split())
+		state.update(kws)
+		return GWCTrip(**state)
 
 
 class GWCJnSig:
@@ -433,6 +530,14 @@ class GWCAPISerw:
 		self.ctx = None
 
 
+	def _api_cache(self, fn_tpl=None, data=..., fn=None):
+		if not fn:
+			if not self.conf.debug_http_dir: return
+			self.conf._debug_files[fn_tpl] += 1
+			fn = self.conf.debug_http_dir / fn_tpl.format(self.conf._debug_files[fn_tpl])
+		if data is ...: return json.loads(fn.read_text()) if fn.exists() else None
+		with fn.open('w') as dst: json.dump(data, dst, **json_pretty)
+
 	def api_url(self, p, **q):
 		if not re.search('^(https?|ws):', p):
 			url = f'{self.conf.serw_api_url}/{p.lstrip("/")}'
@@ -444,27 +549,30 @@ class GWCAPISerw:
 
 	async def api_call(self, method, p, j=None, headers=None, q=None):
 		self.log.debug('serw-api call: {} {}', method, p)
+
 		if self.conf.debug_cache_dir:
 			self.conf._debug_files['_req'] += 1
 			cache_fn = 'api-cache.{:03d}.{}.{}.json'.format(
 				self.conf._debug_files['_req'], method, url_to_fn(p) )
 			cache_fn = self.conf.debug_cache_dir / cache_fn
-			if cache_fn.exists():
+			cached = self._api_cache(fn=cache_fn)
+			if cached is not None:
 				self.log.debug('serw-api cache-read: {}', cache_fn)
-				return json.loads(cache_fn.read_text())
+				return cached
+
+		url = self.api_url(p, **(q or dict()))
+		self._api_cache( f'api-req.{url_to_fn(p)}.res.{{:03d}}.info',
+			dict(method=method, url=url, p=p, json=j, headers=list(
+				f'{k}: {v}' for k,v in self.http._prepare_headers(headers).items() )) )
+
 		try:
-			async with self.http.request( method,
-					self.api_url(p, **(q or dict())), json=j, headers=headers ) as res:
+			async with self.http.request(method, url, json=j, headers=headers) as res:
 				if res.content_type != 'application/json':
 					data = await res.read()
 					raise GWCAPIError(res.status, f'non-json response - {data!r}')
 				data = await res.json()
-				if self.conf.debug_http_dir:
-					fn = f'api-req.{url_to_fn(p)}.res.{{:03d}}.json'
-					self.conf._debug_files[fn] += 1
-					with ( self.conf.debug_http_dir /
-							fn.format(self.conf._debug_files[fn]) ).open('w') as dst:
-						json.dump(data, dst)
+				self._api_cache(f'api-req.{url_to_fn(p)}.res.{{:03d}}.json', data)
+
 				if isinstance(data, dict) and data.get('errors'):
 					err = data['errors']
 					try:
@@ -476,11 +584,14 @@ class GWCAPISerw:
 				elif isinstance(data, dict) and 'result' not in data:
 					raise GWCAPIError(res.status, f'no "result" key in data - {data!r}')
 				if res.status != 200: raise GWCAPIError(res.status, 'non-200 response status')
+
 		except aiohttp.ClientError as err:
 			raise GWCAPIError(None, f'[{err.__class__.__name__}] {err}') from None
+
 		if self.conf.debug_cache_dir:
 			self.log.debug('serw-api cache-write: {}', cache_fn)
-			cache_fn.write_text(json.dumps(data))
+			self._api_cache(fn=cache_fn, data=data)
+
 		return data
 
 
@@ -498,24 +609,26 @@ class GWCAPISerw:
 		# 	await res.json()
 		raise GWCError(f'Falied to process station code to 4-digit nlc: {code_raw!r}')
 
-	async def get_journeys(self, src, dst, ts_start=None, ts_end=None):
+	async def get_journeys(self, src, dst, ts_dep=None):
+		'''Query API and return a list of journeys from src to dst,
+				starting at ts_dep UTC/BST datetime (without timezone, default: now) or later.
+			ts_dep can be either datetime or tuple to specify departure date/time range.
+			Default ts_dep range if only one datetime is specified is (ts_dep, ts_dep+3h).'''
 		src = await self.get_station(src, self.st_type.src)
 		dst = await self.get_station(dst, self.st_type.dst)
 
-		# Default is to use current time and +2d as ts_end
-		if not ts_start:
-			ts = dt.datetime.now()
-			ts -= dt.timedelta(seconds=time.localtime().tm_gmtoff) # to utc
-			if ( (ts.month > 3 or ts.month < 10) # "mostly correct" (tm) DST hack
+		# Default is to use current time as ts_start and +3h as ts_end
+		if not ts_dep:
+			ts = dt.datetime.utcnow()
+			if ( (ts.month > 3 or ts.month < 10) # "mostly correct" (tm) DST hack for BST
 					or (ts.month == 3 and ts.day >= 27)
 					or (ts.month == 10 and ts_start.day <= 27) ):
 				ts += dt.timedelta(seconds=3600)
-			ts_start = ts
-		if not ts_end:
-			ts_end = ts_start + dt.timedelta(days=2)
-		ts_start, ts_end = (
-			(ts if isinstance(ts, str) else ts.strftime('%Y-%m-%dT%H:%M:%S'))
-			for ts in [ts_start, ts_end] )
+			ts_dep = ts
+		if not isinstance(ts_dep, tuple):
+			ts_dep = ts_dep, ts_dep + dt.timedelta(seconds=3*3600)
+		ts_start, ts_end = (( ts if isinstance(ts, str)
+			else ts.strftime('%Y-%m-%dT%H:%M:%S') ) for ts in ts_dep )
 
 		jp_res = await self.api_call( 'post', 'jp/journey-plan',
 			dict( origin=src, destination=dst,
@@ -539,11 +652,11 @@ class GWCAPISerw:
 
 	async def test_trip(self, trip):
 		async with self.rate_sem:
-			# XXX: fetch corresponding info from api and test against trip
-			src, dst = trip
-			jns = await self.get_journeys(src, dst)
+			src, dst = (trip.stops[n].crs for n in [0, -1])
+			jns = await self.get_journeys(src, dst, ts_dep=(trip.ts_start, trip.ts_end))
 			print('trip:', trip)
 			print('journeys:', jns)
+			die()
 			return True
 
 
@@ -607,19 +720,44 @@ class GWCTestRunner:
 		return self.db.escape(val)
 
 
-	async def run_test(self, trip, max_parallel):
+	async def _run_test(self, trip, max_parallel):
 		'''Runs test on random apis with specified
 			max concurrency, preferring ones that are ready first.'''
 		api_list, pending = list(self.api_list), list()
-		random.shuffle(api_list)
-		while api_list or pending:
-			if api_list and len(pending) < max_parallel:
-				api_list.sort(key=op.methodcaller('ready'))
-				while len(pending) < max_parallel:
-					pending.append(self.loop.create_task(api_list.pop().test_trip(trip)))
-			done, pending = await asyncio.wait(
-				pending, return_when=asyncio.FIRST_COMPLETED )
-			for fut in done: yield fut.result()
+		try:
+			random.shuffle(api_list)
+			while api_list or pending:
+				if api_list and len(pending) < max_parallel:
+					api_list.sort(key=op.methodcaller('ready'))
+					while len(pending) < max_parallel:
+						pending.append(self.loop.create_task(api_list.pop().test_trip(trip)))
+				done, pending = await asyncio.wait(
+					pending, return_when=asyncio.FIRST_COMPLETED )
+				for fut in done: yield fut.result()
+		finally:
+			for task in pending:
+				task.cancel()
+				await task
+
+	async def run_test(self, trip, ts_start=None):
+		if ts_start: trip = trip.copy(ts_start=ts_start)
+		tm, tm_parallel = self.conf.test_match, self.conf.test_match_parallel
+		if tm is tm.any: tm_parallel = 1
+		test_result_iter = self._run_test(trip, tm_parallel)
+		if tm is tm.all:
+			async for res in test_result_iter:
+				if not res:
+					raise GWCTestFail(trip)
+					break
+		elif tm is tm.first:
+			async for res in test_result_iter:
+				if res: break
+			else: raise GWCTestFail(trip)
+		elif tm is tm.any:
+			async for res in test_result_iter:
+				if not res: raise GWCTestFail(trip)
+				break
+		else: raise ValueError(tm)
 
 
 	async def get_trips(self):
@@ -646,13 +784,7 @@ class GWCTestRunner:
 			f'SELECT COUNT(*) FROM trips t {train_uid_slice}' )
 		yield trip_count[0][0]
 		trips = self.q(f'''
-			SELECT
-				t.trip_id,
-				t.service_id AS svc_id,
-				st.stop_id AS id,
-				st.stop_sequence AS seq,
-				st.arrival_time AS ts_arr,
-				st.departure_time AS ts_dep
+			SELECT *
 			FROM trips t
 			{train_uid_slice}
 			LEFT JOIN stop_times st USING(trip_id)
@@ -665,11 +797,10 @@ class GWCTestRunner:
 			else: stops.append(t)
 		yield stops
 
-
-
 	async def run(self):
-		tm, tm_parallel = self.conf.test_match, self.conf.test_match_parallel
-		if tm is tm.any: tm_parallel = 1
+		stats = collections.Counter()
+		ts = dt.datetime.now()
+		date_current, time_current = ts.date(), ts.time()
 
 		while True: # XXX: loop until some coverage level
 			# XXX: ordering - pick diff types of schedules, train_uids, etc
@@ -679,33 +810,53 @@ class GWCTestRunner:
 			progress = progress_iter(self.log, 'trips', trip_count)
 
 			async for stops in trips:
-				t = stops[0]
-				for stop in stops: print(stop)
-			exit() # XXX
+				train_uid, service_id = op.attrgetter('trip_headsign', 'service_id')(stops[0])
 
-			trip = 'SHF', 'LBG' # XXX: get from gtfs db
+				test_stops, buff = list(), list()
+				for s in stops:
+					if not test_stops:
+						if s.pickup_type == GTFSEmbarkType.none: continue
+						test_stops.append(s)
+					else:
+						buff.append(s)
+						if s.drop_off_type == GTFSEmbarkType.none: continue
+						test_stops.extend(buff)
+						buff.clear()
+				if len(test_stops) < 2:
+					stats['trip-skip-no-public-stops'] += 1
+					continue
+				time0 = dts_to_dt(test_stops[0].departure_time)
+				trip = GWCTrip.from_gtfs_stops(train_uid, test_stops)
 
-			test_result_iter = self.run_test(trip, tm_parallel)
+				dates = await self.qb(f'''
+					SELECT
+						service_id AS id, start_date AS a, end_date AS b,
+						CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS weekdays,
+						date, exception_type AS exc
+					FROM calendar c
+					LEFT JOIN calendar_dates cd USING(service_id)
+					WHERE service_id = %s''', service_id)
+				svc = dates[0]
+				dates = list() if svc.date is None else [svc, *dates]
+				dates, exc_dates = (
+					set(row.date for row in dates if row.exc == GTFSExceptionType.added),
+					set(row.date for row in dates if row.exc == GTFSExceptionType.removed) )
+				span = Timespan(svc.a, svc.b, tuple(map(int, svc.weekdays)), exc_dates)
+				dates.update(span.date_iter())
+				dates = list(it.dropwhile(lambda date: not ( date > date_current
+					or (date == date_current and time0 > time_current) ), sorted(dates)))
+				dates = dates[:self.conf.test_trip_days]
+				if not dates:
+					stats['trip-skip-past'] += 1
+					continue
 
-			if tm is tm.all:
-				async for res in test_result_iter:
-					if not res:
-						print('FAIL') # XXX
-						break
+				for date in dates:
+					ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
+					await self.run_test(trip, ts_start=ts_src) # XXX: nice repr for failures
 
-			elif tm is tm.first:
-				async for res in test_result_iter:
-					if res: break
-				else: print('FAIL') # XXX
-
-			elif tm is tm.any:
-				async for res in test_result_iter:
-					if not res: print('FAIL') # XXX
-					break
-
-			else: raise ValueError(tm)
-
-			print('SUCCESS')
+		log_lines(self.log.debug, ['Stats:', *(
+			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
+			for k,v in sorted(stats.items()) )])
 
 
 async def run_tests(loop, conf):
