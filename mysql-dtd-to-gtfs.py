@@ -671,7 +671,7 @@ class DTDtoGTFS:
 				FROM {self.db_cif}.fixed_link''')
 
 
-	def _get_schedules(self, test_run_slice, z_part=0.3):
+	def _get_schedules(self, test_run_slice=None, z_part=0.3):
 		'''Iterator for raw cif.schedule rows from db.
 			Schedules are fetched along with stops/stop_times.
 			Two tables are queried in order: cif.schedule and cif.z_schedule.'''
@@ -731,12 +731,17 @@ class DTDtoGTFS:
 		self.log.debug('Schedule counts: regular={:,}, z={:,}', *sched_counts)
 		yield sum(sched_counts)
 
-		test_run_slice_repr = ( str(test_run_slice)
-			if isinstance(test_run_slice, int) else f'[{len(test_run_slice):,} train_uids]' )
+		if test_run_slice:
+			test_run_slice_repr = ( str(test_run_slice)
+				if isinstance(test_run_slice, int) else f'[{len(test_run_slice):,} train_uids]' )
+			test_run_slice_repr = f', test-train-limit={{z_slice}}{test_run_slice_repr}'
+		else: test_run_slice_repr = ''
+
 		for sched_count, qt in zip(sched_counts, q_tweaks):
 			self.log.debug(
-				'Fetching cif.{}schedule entries (count={:,}, test-train-limit={}{})...',
-				qt['z'], sched_count, (f'{qt["z_slice"]}/' if qt['z_slice'] else ''), test_run_slice_repr )
+				'Fetching cif.{}schedule entries (count={:,}{})...',
+				qt['z'], sched_count, test_run_slice_repr,
+				z_slice=(f'{qt["z_slice"]}/' if qt['z_slice'] else '') )
 			yield from self.q(q_sched.format(**qt))
 
 	def get_schedules(self, test_run_slice):
