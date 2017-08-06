@@ -26,7 +26,7 @@ class TestConfig:
 	test_train_uids = None
 
 	# XXX: negative tests - specifically pick bank holidays and exception days
-	test_trip_days = 7
+	test_trip_days = 1
 	test_trip_embark_delay = dt.timedelta(seconds=20*60)
 	test_trip_journeys = 3 # should be high enough for testee direct trip to be there
 	test_trip_time_slack = 5*60 # max diff in stop times
@@ -53,6 +53,7 @@ class TestConfig:
 
 	debug_http_dir = None
 	debug_cache_dir = None
+	debug_trigger_mismatch = None
 
 	def __init__(self):
 		self._debug_files = collections.Counter()
@@ -664,6 +665,8 @@ class GWCAPISerw:
 		return not self.rate_sem.locked()
 
 	async def test_trip(self, trip):
+		fail = self.conf.debug_trigger_mismatch
+		fail = fail.lower().split() if fail else list()
 		async with self.rate_sem:
 			src, dst = (trip.stops[n].crs for n in [0, -1])
 			jns = await self.get_journeys(src, dst, ts_dep=(trip.ts_start, trip.ts_end))
@@ -673,16 +676,25 @@ class GWCAPISerw:
 				if len(jn.trips) > 1: continue
 				jn_trip = jn.trips[0]
 				if jn_trip.train_uid != trip.train_uid: continue
+				if 'nojourney' in fail:
+					jn_trip.train_uid += 'x'
+					continue
 				break
 			else: raise GWCTestFailNoJourney(trip, jns)
 
 			## Match all stops/stop-times
 			# SERW API returns non-public stops, which are missing in gtfs
-			trip_stops = iter(trip.stops)
-			for st1 in trip.stops:
-				for st2 in jn_trip.stops:
+			jn_stops_iter = iter(jn_trip.stops)
+			mismatch_n = ( None
+				if 'stopnotfound' not in fail else
+				random.randrange(0, len(trip.stops)) )
+			for n, st1 in enumerate(trip.stops):
+				if n == mismatch_n and 'stopnotfound' in fail: st1.crs += 'x'
+				for st2 in jn_stops_iter:
 					if st1.crs == st2.crs: break
 				else: raise GWCTestFailStopNotFound(trip, jn_trip, st1)
+				if n == mismatch_n and 'stopmismatch' in fail:
+					st1.ts += dt.timedelta(seconds=self.conf.test_trip_time_slack + 5*60)
 				ts_diff = abs(st1.ts.total_seconds() - st2.ts.total_seconds())
 				if ts_diff > self.conf.test_trip_time_slack:
 					raise GWCTestFailStopMismatch( trip, jn_trip,
@@ -954,6 +966,11 @@ def main(args=None, conf=None):
 		help='Cache API requests to dir if missing, or re-use cached ones from there.')
 	group.add_argument('--debug-http-dir', metavar='path',
 		help='Directory path to dump http various responses and headers to.')
+	group.add_argument('-x', '--debug-trigger-mismatch', metavar='type',
+		help='Trigger data mismatch of specified type in all tested entries.'
+			' Supported types correspond to implemented GWCTestFail'
+				' exceptions, e.g.: NoJourney, StopNotFound, StopMismatch.'
+			' Multiple values can be specified in one space-separated arg.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -998,6 +1015,7 @@ def main(args=None, conf=None):
 
 	if opts.debug_http_dir: conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
 	if opts.debug_cache_dir: conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
+	if opts.debug_trigger_mismatch: conf.debug_trigger_mismatch = opts.debug_trigger_mismatch
 
 	log.debug('Starting run_tests loop...')
 	with contextlib.closing(asyncio.get_event_loop()) as loop:
