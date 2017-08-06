@@ -178,9 +178,12 @@ class AsyncExitStack:
 				except BaseException as e: result = gen.throw(e)
 		except StopIteration as e: return e.value
 
-async def anext(aiter): # py3.7
+
+class AsyncStopIteration(Exception): pass
+
+async def anext(aiter): # py3.7?
 	async for v in aiter: return v
-	raise StopIteration
+	raise AsyncStopIteration
 
 
 class LogMessage(object):
@@ -247,9 +250,10 @@ def iter_range(a, b, step):
 		if v == b: break
 		v += step
 
-def random_weight(items):
+def random_weight(items, keys_subset=None):
 	if isinstance(items, dict): items = items.items()
-	keys, weights = zip(*items)
+	keys = set(keys_subset or set())
+	keys, weights = zip(*((k,v) for k,v in items if not keys or k in keys))
 	return random.choices(keys, weights)[0]
 
 popn = lambda v,n: list(v.pop() for m in range(n))
@@ -907,43 +911,66 @@ class GWCTestRunner:
 		return dates_pick
 
 	async def _pick_trips(self):
-		train_uid_slice = self.conf.test_train_uids
-		if isinstance(train_uid_slice, int): # XXX: randomize
-			train_uid_slice = f'''
+		test_train_uids = self.conf.test_train_uids
+		if isinstance(test_train_uids, int):
+			test_train_uids = set(map(op.itemgetter(0), await self.qb(
+				'SELECT trip_headsign FROM trips GROUP BY trip_headsign LIMIT %s', test_train_uids )))
+		else: test_train_uids = set(test_train_uids)
+		if test_train_uids:
+			train_uid_join = ','.join(map(self.escape, test_train_uids))
+			train_uid_join = f'''
 				JOIN
-					( SELECT trip_headsign AS train_uid
+					( SELECT trip_headsign
 						FROM trips
-						GROUP BY trip_headsign
-						LIMIT {train_uid_slice} ) r
-					ON r.train_uid = t.trip_headsign'''
-		elif train_uid_slice:
-			train_uid_slice = ','.join(map(self.escape, train_uid_slice))
-			train_uid_slice = f'''
-				JOIN
-					( SELECT trip_headsign AS train_uid
-						FROM trips
-						WHERE train_uid IN ({train_uid_slice})
+						WHERE trip_headsign IN ({train_uid_join})
 						GROUP BY trip_headsign ) r
-					ON r.train_uid = t.trip_headsign'''
-		else: train_uid_slice = ''
+					USING(trip_headsign)'''
+		else: train_uid_join = ''
 
 		trip_ids = await self.qb(
-			f'SELECT trip_id FROM trips t {train_uid_slice}' )
+			f'SELECT trip_id FROM trips t {train_uid_join}' )
 		yield map(op.itemgetter(0), trip_ids)
 
-		trips = self.q(f'''
-			SELECT *
+		q_base = f'''
+			SELECT %s AS t, t.*, st.*
 			FROM trips t
-			{train_uid_slice}
+			{train_uid_join}
 			LEFT JOIN stop_times st USING(trip_id)
-			ORDER BY t.trip_id, st.stop_sequence''')
-		trip_id, stops = ..., None
-		async for t in trips:
-			if t.trip_id != trip_id:
-				yield stops
-				trip_id, stops = t.trip_id, [t]
-			else: stops.append(t)
-		yield stops
+			{{}}
+			ORDER BY t.trip_id, st.stop_sequence'''
+		trip_iters = dict(
+			(k, self.q(q_base.format(check), k, c=f'trips_{k}'))
+			for k, check in dict( seq='',
+				assoc=r"WHERE trip_headsign LIKE '%%\_%%'",
+				z="WHERE trip_headsign LIKE 'Z%%'" ).items() )
+		trip_buffs = dict.fromkeys(trip_iters, (..., None))
+		if set(self.conf.test_pick_trip).difference(trip_iters):
+			raise ValueError(self.conf.test_pick_trip)
+
+		while trip_iters:
+			pick = random_weight(self.conf.test_pick_trip, trip_iters)
+			stops_trip_id, stops = trip_buffs[pick]
+			while True:
+				try:
+					t = await anext(trip_iters[pick])
+					trip_id, train_uid, stop = t.trip_id, t.trip_headsign, t
+				except AsyncStopIteration:
+					trip_id = train_uid = stop = None
+					del trip_iters[pick]
+				else:
+					if ( train_uid and test_train_uids is not None
+						and train_uid not in test_train_uids ): continue
+				if trip_id != stops_trip_id:
+					trip_buffs[pick] = trip_id, [stop]
+					if stops:
+						yield stops
+						if test_train_uids is not None:
+							test_train_uids.discard(stops[0].trip_headsign)
+						break
+					elif not trip_id: break
+					stops_trip_id, stops = trip_buffs[pick]
+				else: stops.append(stop)
+
 
 	async def pick_trips(self):
 		self.stats['trip-skip-set-init'] = len(self.trip_skip)
@@ -953,7 +980,6 @@ class GWCTestRunner:
 		yield len(set(trip_ids).difference(self.trip_skip))
 
 		async for stops in trips:
-			if not stops: continue
 			trip_id = stops[0].trip_id
 			if trip_id in self.trip_skip:
 				self.stats['trip-skip-set'] += 1
