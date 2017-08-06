@@ -28,6 +28,9 @@ class TestConfig:
 	## test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
 	test_train_uids = None
 
+	## test_trip_log: path to file to append tested trip_id's to and skip ones already there.
+	test_trip_log = None
+
 	# XXX: negative tests - specifically pick bank holidays and exception days
 	test_trip_dates = 3
 	test_trip_embark_delay = dt.timedelta(seconds=20*60)
@@ -51,7 +54,9 @@ class TestConfig:
 			'otrl|a6af56be1691ac2929898c9f68c4b49a0a2d930849770dba976be5d792a',
 		'User-Agent': 'gtfs-webcheck/1.0 (+https://github.com/mk-fg/open-track-dtd2mysql-gtfs/)',
 	}
-	serw_error_skip = {('Warning', 'IptisNrsError')} # IPTIS is related to fares?
+	serw_error_skip = {
+		# Skip any IPTIS-related warnings - should only be relevant for fares afaict
+		('Warning', 'IptisNrsError'), ('Warning', 'IptisNoRealTimeDataAvailable') }
 
 	rate_interval = 3 # seconds
 	rate_max_concurrency = 1
@@ -611,17 +616,19 @@ class GWCAPISerw:
 		if data is ...: return json.loads(fn.read_text()) if fn.exists() else None
 		with fn.open('w') as dst: json.dump(data, dst, **json_pretty)
 
-	def _api_error_check(self, data):
+	def _api_error_check(self, http_status, data):
 		if isinstance(data, dict) and data.get('errors'):
 			err = data['errors']
 			try:
 				err, = err
 				err = err.get('failureType'), err['errorCode']
-			except: raise GWCAPIError(res.status, err)
+			except: raise GWCAPIError(http_status, err)
 			if err not in self.conf.serw_error_skip:
-				raise GWCAPIErrorCode(res.status, *err)
+				raise GWCAPIErrorCode(http_status, *err)
 		elif isinstance(data, dict) and 'result' not in data:
-			raise GWCAPIError(res.status, f'no "result" key in data - {data!r}')
+			raise GWCAPIError(http_status, f'no "result" key in data - {data!r}')
+		if http_status != 200:
+			raise GWCAPIError(res.status, 'non-200 response status')
 
 	def api_url(self, p, **q):
 		if not re.search('^(https?|ws):', p):
@@ -657,8 +664,7 @@ class GWCAPISerw:
 					raise GWCAPIError(res.status, f'non-json response - {data!r}')
 				data = await res.json()
 				self._api_cache(f'api-req.{url_to_fn(p)}.res.{{:03d}}.json', data)
-				self._api_error_check(data)
-				if res.status != 200: raise GWCAPIError(res.status, 'non-200 response status')
+				self._api_error_check(res.status, data)
 
 		except aiohttp.ClientError as err:
 			raise GWCAPIError(None, f'[{err.__class__.__name__}] {err}') from None
@@ -784,6 +790,15 @@ class GWCTestRunner:
 		await self.ctx.enter(warnings.catch_warnings())
 		warnings.filterwarnings('error')
 
+		self.trip_log, self.trip_skip = None, set()
+		if self.conf.test_trip_log:
+			self.trip_log = await self.ctx.enter(self.conf.test_trip_log.open('a+'))
+			self.trip_log.seek(0)
+			self.trip_skip.update(map(int, filter(str.isdigit, self.trip_log.read().split())))
+			self.log.debug(
+				'Using trip_id skip-list ({} item[s]) from: {}',
+				len(self.trip_skip), self.trip_log.name )
+
 		self.db_conns, self.db_cursors = dict(), dict()
 		self.db_pool = await self.ctx.enter(
 			aiomysql.create_pool(charset='utf8mb4', **(self.conf.mysql_conn_opts or dict())) )
@@ -891,8 +906,7 @@ class GWCTestRunner:
 			else: raise ValueError(pick)
 		return dates_pick
 
-
-	async def get_trips(self):
+	async def _pick_trips(self):
 		train_uid_slice = self.conf.test_train_uids
 		if isinstance(train_uid_slice, int): # XXX: randomize
 			train_uid_slice = f'''
@@ -912,9 +926,11 @@ class GWCTestRunner:
 						GROUP BY trip_headsign ) r
 					ON r.train_uid = t.trip_headsign'''
 		else: train_uid_slice = ''
-		trip_count = await self.qb(
-			f'SELECT COUNT(*) FROM trips t {train_uid_slice}' )
-		yield trip_count[0][0]
+
+		trip_ids = await self.qb(
+			f'SELECT trip_id FROM trips t {train_uid_slice}' )
+		yield map(op.itemgetter(0), trip_ids)
+
 		trips = self.q(f'''
 			SELECT *
 			FROM trips t
@@ -924,26 +940,49 @@ class GWCTestRunner:
 		trip_id, stops = ..., None
 		async for t in trips:
 			if t.trip_id != trip_id:
-				if stops: yield stops
+				yield stops
 				trip_id, stops = t.trip_id, [t]
 			else: stops.append(t)
 		yield stops
 
+	async def pick_trips(self):
+		self.stats['trip-skip-set-init'] = len(self.trip_skip)
+		trips = self._pick_trips()
+
+		trip_ids = await anext(trips)
+		yield len(set(trip_ids).difference(self.trip_skip))
+
+		async for stops in trips:
+			if not stops: continue
+			trip_id = stops[0].trip_id
+			if trip_id in self.trip_skip:
+				self.stats['trip-skip-set'] += 1
+				continue
+			yield stops
+			self.trip_skip.add(trip_id)
+			if self.trip_log: self.trip_log.write(f'{trip_id}\n')
+
+
 	async def run(self):
-		stats = collections.Counter()
-		stats['diff-total'] = 0
+		self.stats = collections.Counter()
+		self.stats['diff-total'] = 0
 
 		# XXX: loop until some coverage level
 		# XXX: ordering - pick diff types of schedules, train_uids, etc
 
-		trips = self.get_trips()
+		trips = self.pick_trips()
 		trip_count = await anext(trips)
 		progress = progress_iter(self.log, 'trips', trip_count)
+		self.stats['trip-count'] = trip_count
 
 		async for stops in trips:
 			ts = dt.datetime.now()
 			date_current, time_current = ts.date(), ts.time()
-			train_uid, service_id = op.attrgetter('trip_headsign', 'service_id')(stops[0])
+			trip_id, train_uid, service_id = op.attrgetter(
+				'trip_id', 'trip_headsign', 'service_id' )(stops[0])
+			self.log.debug(
+				'Checking trip: id={} train_uid={} service_id={}',
+				trip_id, train_uid, service_id )
 
 			# Find first/last public pickup/dropoff stops for a trip
 			test_stops, buff = list(), list()
@@ -957,7 +996,7 @@ class GWCTestRunner:
 					test_stops.extend(buff)
 					buff.clear()
 			if len(test_stops) < 2:
-				stats['trip-skip-no-public-stops'] += 1
+				self.stats['trip-skip-no-public-stops'] += 1
 				continue
 			time0 = dts_to_dt(test_stops[0].departure_time)
 			trip = GWCTrip.from_gtfs_stops(train_uid, test_stops)
@@ -982,22 +1021,24 @@ class GWCTestRunner:
 				or (date == date_current and time0 > time_current) ), sorted(dates)))
 			dates = self.pick_dates(dates)
 			if not dates:
-				stats['trip-skip-past'] += 1
+				self.stats['trip-skip-past'] += 1
 				continue
 
 			# Check produced trip info against API(s)
+			self.stats['trip-check'] += 1
 			for date in dates:
 				ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
+				self.stats['trip-check-date'] += 1
 				try: await self.check_trip(trip, ts_start=ts_src)
 				except GWCTestBatchFail as err_batch:
-					stats['diff-total'] += 1
+					self.stats['diff-total'] += 1
 					for err in err_batch.exc_list:
 						err_type = err.__class__.__name__
 						if not isinstance(err, GWCTestFail):
 							self.log.error('Failed to check trip: {} - [{}] {}', trip, err_type, err)
 							raise err from None
-						stats[f'diff-api-{err.api}'] += 1
-						stats[f'diff-type-{err_type}'] += 1
+						self.stats[f'diff-api-{err.api}'] += 1
+						self.stats[f'diff-type-{err_type}'] += 1
 						log_lines(self.log_diffs.error, [
 							('API [{}] data mismatch for gtfs trip: {}', err.api, err_type),
 							('Trip: {}', trip), ('Date/time: {}', ts_src), 'Diff details:',
@@ -1005,8 +1046,8 @@ class GWCTestRunner:
 
 		log_lines(self.log.debug, ['Stats:', *(
 			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
-			for k,v in sorted(stats.items()) )])
-		if stats['diff-total'] > 0: raise GWCTestFoundDiffs(stats['diff-total'])
+			for k,v in sorted(self.stats.items()) )])
+		if self.stats['diff-total'] > 0: raise GWCTestFoundDiffs(self.stats['diff-total'])
 
 
 async def run_tests(loop, conf):
@@ -1038,29 +1079,31 @@ def main(args=None, conf=None):
 		description='Tool to test gtfs feed (stored in mysql) against online data sources.')
 
 	group = parser.add_argument_group('Testing options')
-	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
-		help='Randomly pick specified number of distinct train_uids for testing, ignoring all others.')
-	group.add_argument('--test-train-uid', metavar='uid-list',
-		help='Test entries for specified train_uid only. Multiple values are split by spaces.')
-	group.add_argument('--diff-log', metavar='path',
+	group.add_argument('-s', '--trip-id-log', metavar='path',
+		help='Append each checked trip_id to specified file, and skip ones that are already there.')
+	group.add_argument('-f', '--diff-log', metavar='path',
 		help='Log diffs to a specified file'
 				' (using WatchedFileHandler) instead of stderr that default logging uses.'
 			' "-" or "1" can be used for stdout, any integer value for other open fds.')
 	group.add_argument('--diff-log-fmt', metavar='format',
 			help='Log line format for --diff-log for python stdlib logging module.')
+	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
+		help='Randomly pick specified number of distinct train_uids for testing, ignoring all others.')
+	group.add_argument('--test-train-uid', metavar='uid-list',
+		help='Test entries for specified train_uid only. Multiple values are split by spaces.')
 
 	group = parser.add_argument_group('MySQL db parameters')
 	group.add_argument('-d', '--gtfs-db-name',
 		default='gtfs', metavar='db-name',
 		help='Database name to read GTFS data from (default: %(default)s).')
-	group.add_argument('-f', '--mycnf-file',
+	group.add_argument('--mycnf-file',
 		metavar='path', default=str(pathlib.Path('~/.my.cnf').expanduser()),
 		help='Alternative ~/.my.cnf file to use to read all connection parameters from.'
 			' Parameters there can include: host, port, user, passwd, connect,_timeout.'
 			' Overidden parameters:'
 				' db (specified via --src-cif-db/--dst-gtfs-db options),'
 				' charset=utf8mb4 (for max compatibility).')
-	group.add_argument('-g', '--mycnf-group', metavar='group',
+	group.add_argument('--mycnf-group', metavar='group',
 		help='Name of "[group]" (ini section) in ~/.my.cnf ini file to use parameters from.')
 
 	group = parser.add_argument_group('Extra data sources')
@@ -1091,12 +1134,15 @@ def main(args=None, conf=None):
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
+	sys.stdout = open(sys.stdout.fileno(), 'w', 1)
 	logging.basicConfig(
 		datefmt='%Y-%m-%d %H:%M:%S',
 		format='%(asctime)s :: {}%(levelname)s :: %(message)s'\
 			.format('%(name)s ' if opts.debug else ''),
 		level=logging.DEBUG if opts.debug else logging.INFO )
 	log = get_logger('gwc.main')
+
+	if opts.trip_id_log: conf.test_trip_log = pathlib.Path(opts.trip_id_log)
 
 	if opts.diff_log:
 		if opts.diff_log == '-': opts.diff_log = '1'
@@ -1130,6 +1176,12 @@ def main(args=None, conf=None):
 					log.warning('Failed to process "crs,nlc" csv line: {!r} [{}]', line, n)
 		conf.serw_crs_nlc_map = crs_nlc_map
 
+	if opts.bank_holiday_list:
+		conf.bank_holidays = set()
+		with pathlib.Path(opts.bank_holiday_list).open() as src:
+			for line in src.read().splitlines():
+				conf.bank_holidays.add(dt.datetime.strptime(line, opts.bank_holiday_fmt).date())
+
 	conf.mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
 		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
 	conf.mysql_db_name = opts.gtfs_db_name
@@ -1139,12 +1191,6 @@ def main(args=None, conf=None):
 		if opts.test_train_limit:
 			conf.test_train_uids = conf.test_train_uids[:opts.test_train_limit]
 	else: conf.test_train_uids = opts.test_train_limit
-
-	if opts.bank_holiday_list:
-		conf.bank_holidays = set()
-		with pathlib.Path(opts.bank_holiday_list).open() as src:
-			for line in src.read().splitlines():
-				conf.bank_holidays.add(dt.datetime.strptime(line, opts.bank_holiday_fmt).date())
 
 	if opts.debug_http_dir: conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
 	if opts.debug_cache_dir: conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
