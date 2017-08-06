@@ -2,9 +2,10 @@
 
 import itertools as it, operator as op, functools as ft
 import datetime as dt
-import os, sys, pathlib, logging, signal, locale, warnings
+import os, sys, pathlib, signal, locale, warnings
 import contextlib, inspect, collections, enum, time
 import asyncio, urllib.parse, json, re, random, secrets
+import textwrap, pprint, logging, logging.handlers
 
 import aiohttp # http://aiohttp.readthedocs.io
 import aiomysql # http://aiomysql.readthedocs.io
@@ -179,6 +180,9 @@ class LogMessage(object):
 class LogStyleAdapter(logging.LoggerAdapter):
 	def __init__(self, logger, extra=None):
 		super(LogStyleAdapter, self).__init__(logger, extra or {})
+	def addHandler(self, handler, propagate=False):
+		self.logger.propagate = propagate
+		return self.logger.addHandler(handler)
 	def log(self, level, msg, *args, **kws):
 		if not self.isEnabledFor(level): return
 		log_kws = {} if 'exc_info' not in kws else dict(exc_info=kws.pop('exc_info'))
@@ -236,6 +240,8 @@ def iter_range(a, b, step):
 popn = lambda v,n: list(v.pop() for m in range(n))
 url_to_fn = lambda p: p.replace('/', '-').replace('.', '_')
 json_pretty = dict(sort_keys=True, indent=2, separators=(',', ': '))
+pformat_data = lambda data: pprint.pformat(data, indent=2, width=100)
+
 def die(): raise RuntimeError
 
 
@@ -365,7 +371,15 @@ class GWCError(Exception): pass
 class GWCAPIError(GWCError): pass
 class GWCAPIErrorCode(GWCAPIError): pass
 
-class GWCTestFail(Exception): pass
+class GWCTestFoundDiffs(Exception): pass
+
+class GWCTestBatchFail(Exception):
+	def __init__(self, *exc_list): self.exc_list = exc_list
+
+class GWCTestFail(Exception):
+	def __init__(self, api, trip, data, diff=None):
+		self.api, self.trip, self.diff, self.data = api, trip, diff, data
+
 class GWCTestFailNoJourney(GWCTestFail): pass
 class GWCTestFailStopNotFound(GWCTestFail): pass
 class GWCTestFailStopMismatch(GWCTestFail): pass
@@ -525,6 +539,8 @@ class GWCJn:
 
 class GWCAPISerw:
 
+	api_tag = 'serw'
+
 	def __init__(self, loop, conf, rate_sem=None):
 		self.loop, self.conf = loop, conf
 		self.rate_sem = rate_sem or RateSemaphore.dummy()
@@ -680,25 +696,22 @@ class GWCAPISerw:
 					jn_trip.train_uid += 'x'
 					continue
 				break
-			else: raise GWCTestFailNoJourney(trip, jns)
+			else: raise GWCTestFailNoJourney(self.api_tag, trip, jns)
 
 			## Match all stops/stop-times
 			# SERW API returns non-public stops, which are missing in gtfs
-			jn_stops_iter = iter(jn_trip.stops)
-			mismatch_n = ( None
-				if 'stopnotfound' not in fail else
-				random.randrange(0, len(trip.stops)) )
+			jn_stops_iter, mismatch_n = iter(jn_trip.stops), random.randrange(0, len(trip.stops))
 			for n, st1 in enumerate(trip.stops):
 				if n == mismatch_n and 'stopnotfound' in fail: st1.crs += 'x'
 				for st2 in jn_stops_iter:
 					if st1.crs == st2.crs: break
-				else: raise GWCTestFailStopNotFound(trip, jn_trip, st1)
+				else: raise GWCTestFailStopNotFound(self.api_tag, trip, [jn_trip, st1])
 				if n == mismatch_n and 'stopmismatch' in fail:
-					st1.ts += dt.timedelta(seconds=self.conf.test_trip_time_slack + 5*60)
+					st1.ts = st2.ts + dt.timedelta(seconds=self.conf.test_trip_time_slack + 5*60)
 				ts_diff = abs(st1.ts.total_seconds() - st2.ts.total_seconds())
 				if ts_diff > self.conf.test_trip_time_slack:
-					raise GWCTestFailStopMismatch( trip, jn_trip,
-						st1.crs, (st1.ts, st2.ts), (ts_diff, self.conf.test_trip_time_slack) )
+					raise GWCTestFailStopMismatch( self.api_tag, trip,
+						[jn_trip, st1.crs, (st1.ts, st2.ts), (ts_diff, self.conf.test_trip_time_slack)] )
 
 
 class GWCTestRunner:
@@ -706,7 +719,7 @@ class GWCTestRunner:
 
 	def __init__(self, loop, conf, api_list):
 		self.loop, self.conf = loop, conf
-		self.log = get_logger('gwc.test')
+		self.log, self.log_diffs = get_logger('gwc.test'), get_logger('gwc.diffs')
 		self.api_list = list(api_list)
 
 	async def __aenter__(self):
@@ -761,8 +774,8 @@ class GWCTestRunner:
 		return self.db.escape(val)
 
 
-	async def _run_test(self, trip, max_parallel):
-		'''Runs test on random apis with specified
+	async def _check_trip(self, trip, max_parallel):
+		'''Runs trip check on random apis with specified
 			max concurrency, preferring ones that are ready first.'''
 		api_list, pending = list(self.api_list), list()
 		try:
@@ -782,24 +795,26 @@ class GWCTestRunner:
 				task.cancel()
 				await task
 
-	async def run_test(self, trip, ts_start=None):
+	async def check_trip(self, trip, ts_start=None):
+		'''Checks trip info against API, passing
+			raised GWCTestFail exception(s) wrapped into GWCTestBatchFail.'''
 		if ts_start: trip = trip.copy(ts_start=ts_start)
 		tm, tm_parallel = self.conf.test_match, self.conf.test_match_parallel
 		if tm is tm.any: tm_parallel = 1
-		test_result_iter = self._run_test(trip, tm_parallel)
+		test_result_iter = self._check_trip(trip, tm_parallel)
 		if tm is tm.all:
 			async for res in test_result_iter:
-				if not res.success: raise res.exc
+				if not res.success: raise GWCTestBatchFail(res.exc)
 		elif tm is tm.any:
 			async for res in test_result_iter:
-				if not res.success: raise res.exc
+				if not res.success: raise GWCTestBatchFail(res.exc)
 				break
 		elif tm is tm.first:
-			err_list = list()
+			exc_list = list()
 			async for res in test_result_iter:
 				if res.success: break
-				err_list.append(res.exc)
-			else: raise GWCTestFail(err_list)
+				exc_list.append(res.exc)
+			else: raise GWCTestBatchFail(*exc_list)
 		else: raise ValueError(tm)
 
 
@@ -842,8 +857,7 @@ class GWCTestRunner:
 
 	async def run(self):
 		stats = collections.Counter()
-		ts = dt.datetime.now()
-		date_current, time_current = ts.date(), ts.time()
+		stats['diff-total'] = 0
 
 		# XXX: loop until some coverage level
 		# XXX: ordering - pick diff types of schedules, train_uids, etc
@@ -853,6 +867,8 @@ class GWCTestRunner:
 		progress = progress_iter(self.log, 'trips', trip_count)
 
 		async for stops in trips:
+			ts = dt.datetime.now()
+			date_current, time_current = ts.date(), ts.time()
 			train_uid, service_id = op.attrgetter('trip_headsign', 'service_id')(stops[0])
 
 			# Find first/last public pickup/dropoff stops for a trip
@@ -895,15 +911,25 @@ class GWCTestRunner:
 				stats['trip-skip-past'] += 1
 				continue
 
-			# Run the tests
+			# Check produced trip info against API(s)
 			for date in dates:
 				ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
-				await self.run_test(trip, ts_start=ts_src) # XXX: nice repr for failures
+				try: await self.check_trip(trip, ts_start=ts_src)
+				except GWCTestBatchFail as err_batch:
+					stats['diff-total'] += 1
+					for err in err_batch.exc_list:
+						diff_type = err.__class__.__name__
+						stats[f'diff-api-{err.api}'] += 1
+						stats[f'diff-type-{diff_type}'] += 1
+						log_lines(self.log_diffs.error, [
+							('API [{}] data mismatch for gtfs trip: {}', err.api, diff_type),
+							('Trip: {}', trip), ('Date/time: {}', ts_src), 'Diff details:',
+							*textwrap.indent(err.diff or pformat_data(err.data), '  ').splitlines() ])
 
-		if stats:
-			log_lines(self.log.debug, ['Stats:', *(
-				'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
-				for k,v in sorted(stats.items()) )])
+		log_lines(self.log.debug, ['Stats:', *(
+			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
+			for k,v in sorted(stats.items()) )])
+		if stats['diff-total'] > 0: raise GWCTestFoundDiffs(stats['diff-total'])
 
 
 async def run_tests(loop, conf):
@@ -922,7 +948,7 @@ async def run_tests(loop, conf):
 	async with GWCTestRunner(loop, conf, api_list) as tester:
 		try: await tester.run()
 		except asyncio.CancelledError as err: pass
-		# except GWCError as err:
+		except GWCTestFoundDiffs: exit_code = 174 # LSB Init Script Actions: 150-199
 		else: exit_code = 0
 	return exit_code
 
@@ -939,6 +965,12 @@ def main(args=None, conf=None):
 		help='Randomly pick specified number of distinct train_uids for testing, ignoring all others.')
 	group.add_argument('--test-train-uid', metavar='uid-list',
 		help='Test entries for specified train_uid only. Multiple values are split by spaces.')
+	group.add_argument('--diff-log', metavar='path',
+		help='Log diffs to a specified file'
+				' (using WatchedFileHandler) instead of stderr that default logging uses.'
+			' "-" or "1" can be used for stdout, any integer value for other open fds.')
+	group.add_argument('--diff-log-fmt', metavar='format',
+			help='Log line format for --diff-log for python stdlib logging module.')
 
 	group = parser.add_argument_group('MySQL db parameters')
 	group.add_argument('-d', '--gtfs-db-name',
@@ -981,6 +1013,17 @@ def main(args=None, conf=None):
 			.format('%(name)s ' if opts.debug else ''),
 		level=logging.DEBUG if opts.debug else logging.INFO )
 	log = get_logger('gwc.main')
+
+	if opts.diff_log:
+		if opts.diff_log == '-': opts.diff_log = '1'
+		handler = (
+			logging.StreamHandler(open(int(opts.diff_log), 'w', 1))
+			if opts.diff_log.isdigit() else logging.handlers.WatchedFileHandler(opts.diff_log) )
+		if opts.diff_log_fmt: handler.setFormatter(logging.Formatter(opts.diff_log_fmt))
+		handler.setLevel(0)
+		logger = get_logger('gwc.diffs')
+		logger.setLevel(0)
+		logger.addHandler(handler)
 
 	if opts.serw_crs_nlc_csv and opts.serw_crs_nlc_csv != '-':
 		crs_nlc_map, lines_warn = dict(), list()
