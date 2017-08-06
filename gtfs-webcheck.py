@@ -13,17 +13,17 @@ import aiomysql # http://aiomysql.readthedocs.io
 
 class TestConfig:
 
-	# test_match: how to select API to match gtfs data (e.g. trip) against.
-	#  all - query all APIs for match
-	#  any - query one API at random
-	#  first - query APIs until match is found
+	## test_match: how to select API to match gtfs data (e.g. trip) against.
+	##  all - query all APIs for match
+	##  any - query one API at random
+	##  first - query APIs until match is found
 	test_match = enum.Enum('TestMatch', 'all any first').any
 	test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
 
-	# test_pick: order in which gtfs data is selected for testing.
+	## test_pick: order in which gtfs data is selected for testing.
 	# test_pick = enum.Enum('tp', 'random random_consistent column?')
 
-	# test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
+	## test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
 	test_train_uids = None
 
 	# XXX: negative tests - specifically pick bank holidays and exception days
@@ -31,6 +31,8 @@ class TestConfig:
 	test_trip_embark_delay = dt.timedelta(seconds=20*60)
 	test_trip_journeys = 3 # should be high enough for testee direct trip to be there
 	test_trip_time_slack = 5*60 # max diff in stop times
+
+	trip_diff_cmd = 'diff -uw' # for pretty-printing diffs between trip stops
 
 	mysql_db_name = None
 	mysql_conn_opts = dict()
@@ -394,7 +396,7 @@ class GWCTripStop:
 
 	def __repr__(self):
 		embark = '-P'[bool(self.pickup)] + '-D'[bool(self.dropoff)]
-		ts = self.ts.strftime('%H:%M') if self.ts else 'x'
+		ts = str(self.ts) if self.ts else 'x'
 		return f'<TS {self.crs} {self.meta.get("nlc", "x")} {embark} {ts}>'
 
 class GWCTrip:
@@ -557,6 +559,41 @@ class GWCAPISerw:
 		await self.ctx.close()
 		self.ctx = None
 
+	def format_trip_diff(self, gtfs_trip, jn_trip):
+		import subprocess, tempfile
+		gtfs_stops, jn_stops = (list(t.stops) for t in [gtfs_trip, jn_trip])
+
+		# Remove passing stops to highlight relevant mismatches
+		jn_stops_iter, scrub = iter(enumerate(jn_stops)), list()
+		for st1 in gtfs_stops:
+			scrub_ext = list()
+			for n, st2 in jn_stops_iter:
+				if st1.crs == st2.crs:
+					scrub.extend(scrub_ext)
+					scrub_ext.clear()
+					break
+				if not st2.ts: scrub_ext.append(n)
+		for n in scrub: jn_stops[n] = None
+		jn_stops = list(filter(None, jn_stops))
+
+		with tempfile.NamedTemporaryFile(prefix='.gtfs-webcheck.gtfs-trip.') as dst1,\
+				tempfile.NamedTemporaryFile(prefix='.gtfs-webcheck.api-trip.') as dst2:
+			for stops, dst in [(gtfs_stops, dst1), (jn_stops, dst2)]:
+				for s in stops: dst.write(f'{s.crs} {s.ts}\n'.encode())
+				dst.flush()
+			cmd = self.conf.trip_diff_cmd.split() + [dst1.name, dst2.name]
+			try:
+				res = subprocess.run(cmd, stdout=subprocess.PIPE)
+				if res.returncode != 1:
+					raise subprocess.SubprocessError(f'exit_code={res.returncode}')
+			except subprocess.SubprocessError as err:
+				log_lines( self.log.error, [
+					('Failed to get diff output for trips: [{}] {}',
+						err.__class__.__name__, err ),
+					('cmd: {}', cmd), ('  trip-gtfs: {}', gtfs_trip), ('  trip-api: {}', jn_trip) ])
+				return
+			return f'Matching journey trip [{dst2.name}]:\n  {jn_trip}\n{res.stdout.decode()}'
+
 
 	def _api_cache(self, fn_tpl=None, data=..., fn=None):
 		if not fn:
@@ -705,13 +742,19 @@ class GWCAPISerw:
 				if n == mismatch_n and 'stopnotfound' in fail: st1.crs += 'x'
 				for st2 in jn_stops_iter:
 					if st1.crs == st2.crs: break
-				else: raise GWCTestFailStopNotFound(self.api_tag, trip, [jn_trip, st1])
+					if st2.ts:
+						raise GWCTestFailStopNotFound(
+							self.api_tag, trip, [jn_trip, st2], diff=self.format_trip_diff(trip, jn_trip) )
+				else:
+					raise GWCTestFailStopNotFound(
+						self.api_tag, trip, [jn_trip, st1], diff=self.format_trip_diff(trip, jn_trip) )
 				if n == mismatch_n and 'stopmismatch' in fail:
 					st1.ts = st2.ts + dt.timedelta(seconds=self.conf.test_trip_time_slack + 5*60)
 				ts_diff = abs(st1.ts.total_seconds() - st2.ts.total_seconds())
 				if ts_diff > self.conf.test_trip_time_slack:
 					raise GWCTestFailStopMismatch( self.api_tag, trip,
-						[jn_trip, st1.crs, (st1.ts, st2.ts), (ts_diff, self.conf.test_trip_time_slack)] )
+						diff=self.format_trip_diff(trip, jn_trip),
+						data=[jn_trip, st1.crs, (st1.ts, st2.ts), (ts_diff, self.conf.test_trip_time_slack)] )
 
 
 class GWCTestRunner:
@@ -918,11 +961,14 @@ class GWCTestRunner:
 				except GWCTestBatchFail as err_batch:
 					stats['diff-total'] += 1
 					for err in err_batch.exc_list:
-						diff_type = err.__class__.__name__
+						err_type = err.__class__.__name__
+						if not isinstance(err, GWCTestFail):
+							self.log.error('Failed to check trip: {} - [{}] {}', trip, err_type, err)
+							raise err from None
 						stats[f'diff-api-{err.api}'] += 1
-						stats[f'diff-type-{diff_type}'] += 1
+						stats[f'diff-type-{err_type}'] += 1
 						log_lines(self.log_diffs.error, [
-							('API [{}] data mismatch for gtfs trip: {}', err.api, diff_type),
+							('API [{}] data mismatch for gtfs trip: {}', err.api, err_type),
 							('Trip: {}', trip), ('Date/time: {}', ts_src), 'Diff details:',
 							*textwrap.indent(err.diff or pformat_data(err.data), '  ').splitlines() ])
 
