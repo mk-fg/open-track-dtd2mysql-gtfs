@@ -1,63 +1,133 @@
 open-track-dtd2mysql-gtfs
 =========================
 
-Converter for `open-track/dtd2mysql <https://github.com/open-track/dtd2mysql>`_
-parsed UK DTD Timetable schema to GTFS schema in MySQL database (or its forks).
+Misc tools to convert UK railways timetable data (CIF dumps from
+`ATOC website <http://data.atoc.org/data-download>`_) to
+`GTFS feed <https://developers.google.com/transit/gtfs/reference/>`_,
+as well as validate and compare resulting GTFS data.
 
-Basically, given database with schema from `doc/db-schema-cif.sql <doc/db-schema-cif.sql>`_,
-as produced by dtd2mysql, populates database with `GTFS schema <doc/db-schema-gtfs.sql>`_.
+In particular:
 
-This project is a prototype, implementing all necessary conversion steps for
-later reference, i.e. more of a proof of concept than production code.
 
-Under heavy development, nothing works yet.
+- mysql-dtd-to-gtfs.py
+
+  Converts parsed CIF data (stored in MySQL by
+  `open-track/dtd2mysql <https://github.com/open-track/dtd2mysql>`_)
+  to GTFS feed.
+
+  | Source data schema (as created by dtd2mysql): `doc/db-schema-cif.sql <doc/db-schema-cif.sql>`_
+  | GTFS schema: `doc/db-schema-gtfs.sql <doc/db-schema-gtfs.sql>`_
+
+  Requirements:
+  Python-3.6+ or PyPy3-5.8.0+,
+  `pymysql module <https://pymysql.readthedocs.io/>`_.
+
+
+- gtfs-compare.py
+
+  Compares two GTFS feeds (importing into MySQL if necessary),
+  showing any timetable differences between them.
+
+  Designed to compare output between different GTFS converter implementations,
+  e.g. mysql-dtd-to-gtfs.py from this repo and one from dtd2mysql.
+
+  Requirements:
+  Python-3.6+ or PyPy3-5.8.0+,
+  `pymysql <https://pymysql.readthedocs.io/>`_,
+  `deepdiff <http://deepdiff.readthedocs.io/>`_.
+
+
+- gtfs-webcheck.py
+
+  Tool to query/scrape online timetable sources / journey planners and compare
+  trips from there with GTFS data, to highlight any potential bugs in CIF-GTFS
+  export code.
+
+  Requirements:
+  Python-3.6+,
+  `aiohttp <http://aiohttp.readthedocs.io/>`_,
+  `aiomysql <http://aiomysql.readthedocs.io/>`_.
+
+
+For all scripts, most MySQL-related parameters should be specified via
+the usual ~/.my.cnf (or alternative client config, passed as -f/--mycnf-file),
+under -g/--mycnf-group section (or default one, if not specified).
+
+Source/destination database names should be supplied on the command line, see
+``-h/--help`` output for more details.
 
 .. contents::
   :backlinks: none
 
 
-Usage
------
+Usage examples
+--------------
 
-Needs Python-3.6+ (or pypy3-5.8.0+) and
-`pymysql module <https://pymysql.readthedocs.io/>`_.
+- Parse CIF timetable zip from ATOC website to MySQL database using dtd2mysql::
 
-Simple example: ``./mysql-dtd-to-gtfs.py -v``
+    % npm install dtd2mysql
 
-Most MySQL-related parameters should be specified for it via the usual ~/.my.cnf
-(or alternative client config, passed as -f/--mycnf-file), under -g/--mycnf-group
-section (or default one, if not specified).
+    % export DATABASE_HOSTNAME=10.1.0.2 DATABASE_USERNAME=cif DATABASE_PASSWORD=sikrit DATABASE_NAME=cif
+    % dtd2mysql --fares RJFAF499.ZIP
+    % dtd2mysql --fares-clean
+    % dtd2mysql --timetable ttis625.zip
 
-Source/destination database names can also be specified via commandline
-parameters, as well as a few other logging and debug options.
+  (see `open-track/dtd2mysql <https://github.com/open-track/dtd2mysql>`_ for more info)
 
-Running script with --debug flag will make it log progress messages,
-elapsed/estimated time and some stats::
+- Convert imported CIF data to GTFS feed (stored in mysql db)::
 
-  % ./mysql-dtd-to-gtfs.py --debug -n100
-  2017-06-27 07:37:11 :: dtd2gtfs DEBUG :: Processing 414 cif.schedule entries...
-  2017-06-27 07:37:11 :: dtd2gtfs DEBUG :: [schedules] Step  0 / 30: 00.00s trips=0
-  2017-06-27 07:37:11 :: dtd2gtfs DEBUG :: [schedules] Step  1 / 30: 00.02s trips=5
-  2017-06-27 07:37:11 :: dtd2gtfs DEBUG :: [schedules] Step  2 / 30: 00.01s trips=8
-  ...
-  2017-06-27 07:37:12 :: dtd2gtfs DEBUG :: [schedules] Step 29 / 30: 01.00s trips=135
-  2017-06-27 07:37:12 :: dtd2gtfs DEBUG :: Merging service timespans for 141 gtfs.trips...
-  2017-06-27 07:37:12 :: dtd2gtfs DEBUG :: Updating service_id in gtfs.trips table...
-  2017-06-27 07:37:13 :: dtd2gtfs DEBUG :: [LWX3] Stats:
-  2017-06-27 07:37:13 :: dtd2gtfs DEBUG :: [LWX3]   sched-count: 414
-  2017-06-27 07:37:13 :: dtd2gtfs DEBUG :: [LWX3]   sched-entry-C: 58
-  ...
-  2017-06-27 07:37:13 :: dtd2gtfs DEBUG :: [LWX3]   trip-dedup: 91
-  2017-06-27 07:37:13 :: dtd2gtfs DEBUG :: [LWX3]   trip-row-dup: 22
-  2017-06-27 07:37:13 :: dtd2gtfs DEBUG :: [LWX3]   trip-row-dup-op: 43
+    % pip3 install --user pymysql
 
-(-n/--test-train-limit option used here allows to randomly select and process
-schedules for only n trains instead of full database, useful for quick test-runs)
+    % cat >my.cif.cnf <<EOF
+    [client]
+    default-character-set=utf8mb4
+    host=10.1.0.2
+    user=cif
+    password=sikrit
+    EOF
+
+    % ./mysql-dtd-to-gtfs.py --debug -i -f my.cif.cnf -s cif -d gtfs_py
+
+  Using PyPy instead of regular CPython will speed up the process dramatically.
+
+- Use dtd2mysql to produce GTFS feed as txt files in current dir::
+
+    % dtd2mysql --gtfs
+
+  (using same DATABASE_* parameters from env)
+
+- Import GTFS feed from txt files in current dir (".") into MySQL schema,
+  find and display differences between it and gtfs_py feed/db::
+
+    % pip3 install --user deepdiff
+
+    % ./gtfs-compare.py --debug import -i -- . gtfs_ts
+    % ./gtfs-compare.py compare -c cif -- gtfs_py gtfs_ts
+
+  (``-c cif`` will allow script to augment produced diffs with info from
+  e.g. CIF schedule entries, to cross-reference with GTFS data)
+
+- Test GTFS data from gtfs_py db against online sources::
+
+    % pip3 install --user aiohttp aiomysql
+
+    % ./gtfs-webcheck.py --debug -d gtfs_py -n10
+
+  ``-n10`` will limit testing to 10 arbitrary trains.
+
+  For longer runs, see --trip-id-log/--diff-log parameters, rate-limiting, as
+  well as other configuration params, most of which are only available in
+  TestConfig at the top of the script itself at the moment.
 
 
 Links
 -----
 
+* `ATOC website <http://data.atoc.org/data-download>`_
+
+  CIF data downloads for UK railways timetable/fares, requires (free) registration.
+
 * `open-track/dtd2mysql <https://github.com/open-track/dtd2mysql>`_
 
-  Parses CIF-format DTD files into MySQL database, to use with this script.
+  | Parses CIF-format DTD files into MySQL database, to use with this script.
+  | Also has CIF->GTFS exporter implementation under "gtfs" branch.
