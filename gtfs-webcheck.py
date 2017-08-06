@@ -57,6 +57,7 @@ class TestConfig:
 	serw_error_skip = {
 		# Skip any IPTIS-related warnings - should only be relevant for fares afaict
 		('Warning', 'IptisNrsError'), ('Warning', 'IptisNoRealTimeDataAvailable') }
+	serw_api_debug = False
 
 	rate_interval = 3 # seconds
 	rate_max_concurrency = 1
@@ -564,6 +565,7 @@ class GWCAPISerw:
 		self.loop, self.conf = loop, conf
 		self.rate_sem = rate_sem or RateSemaphore.dummy()
 		self.log = get_logger('gwc.api.serw')
+		if not self.conf.serw_api_debug: self.log.setLevel(logging.WARNING)
 
 	async def __aenter__(self):
 		self.ctx = AsyncExitStack()
@@ -746,7 +748,7 @@ class GWCAPISerw:
 			for jn in jns:
 				if len(jn.trips) > 1: continue
 				jn_trip = jn.trips[0]
-				if jn_trip.train_uid != trip.train_uid: continue
+				if jn_trip.train_uid not in trip.train_uid.split('_'): continue
 				if 'nojourney' in fail:
 					jn_trip.train_uid += 'x'
 					continue
@@ -888,28 +890,6 @@ class GWCTestRunner:
 		else: raise ValueError(tm)
 
 
-	def pick_dates(self, dates):
-		'Pick dates to test according to weights in conf.test_pick_date.'
-		dates, weights = list(dates), self.conf.test_pick_date or dict(seq=1)
-		dates_pick, dates_iter = list(), iter(dates)
-		dates_holidays = (self.conf.bank_holidays or set()).intersection(dates)
-		while len(dates_pick) < min(len(dates), self.conf.test_trip_dates):
-			pick = random_weight(weights)
-			if pick == 'seq':
-				for date in dates_iter:
-					if date not in dates_pick: break
-				dates_pick.append(date)
-			elif pick == 'bank_holiday':
-				if not dates_holidays: continue
-				dates_pick.append(dates_holidays.pop())
-			elif pick == 'random':
-				while True:
-					date = random.choice(list(set(dates).difference(dates_pick)))
-					if date not in dates_pick: break
-				dates_pick.append(date)
-			else: raise ValueError(pick)
-		return dates_pick
-
 	async def _pick_trips(self):
 		test_train_uids = self.conf.test_train_uids
 		if isinstance(test_train_uids, int):
@@ -971,7 +951,6 @@ class GWCTestRunner:
 					stops_trip_id, stops = trip_buffs[pick]
 				else: stops.append(stop)
 
-
 	async def pick_trips(self):
 		self.stats['trip-skip-set-init'] = len(self.trip_skip)
 		trips = self._pick_trips()
@@ -987,6 +966,28 @@ class GWCTestRunner:
 			yield stops
 			self.trip_skip.add(trip_id)
 			if self.trip_log: self.trip_log.write(f'{trip_id}\n')
+
+	def pick_dates(self, dates):
+		'Pick dates to test according to weights in conf.test_pick_date.'
+		dates, weights = list(dates), self.conf.test_pick_date or dict(seq=1)
+		dates_pick, dates_iter = list(), iter(dates)
+		dates_holidays = (self.conf.bank_holidays or set()).intersection(dates)
+		while len(dates_pick) < min(len(dates), self.conf.test_trip_dates):
+			pick = random_weight(weights)
+			if pick == 'seq':
+				for date in dates_iter:
+					if date not in dates_pick: break
+				dates_pick.append(date)
+			elif pick == 'bank_holiday':
+				if not dates_holidays: continue
+				dates_pick.append(dates_holidays.pop())
+			elif pick == 'random':
+				while True:
+					date = random.choice(list(set(dates).difference(dates_pick)))
+					if date not in dates_pick: break
+				dates_pick.append(date)
+			else: raise ValueError(pick)
+		return dates_pick
 
 
 	async def run(self):
