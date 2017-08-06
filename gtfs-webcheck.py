@@ -20,22 +20,25 @@ class TestConfig:
 	test_match = enum.Enum('TestMatch', 'all any first').any
 	test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
 
-	## test_pick: order in which gtfs data is selected for testing.
-	# test_pick = enum.Enum('tp', 'random random_consistent column?')
+	## test_pick_*: weights for picking which trips/days to test first.
+	# "seq" in all of these is a simple sequential pick.
+	test_pick_trip = dict(seq=1, assoc=0.5, z=0.2)
+	test_pick_date = dict(seq=1, bank_holiday=2, random=2)
 
 	## test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
 	test_train_uids = None
 
 	# XXX: negative tests - specifically pick bank holidays and exception days
-	test_trip_days = 1
+	test_trip_dates = 3
 	test_trip_embark_delay = dt.timedelta(seconds=20*60)
 	test_trip_journeys = 3 # should be high enough for testee direct trip to be there
 	test_trip_time_slack = 5*60 # max diff in stop times
 
 	trip_diff_cmd = 'diff -uw' # for pretty-printing diffs between trip stops
+	bank_holidays = None
 
 	mysql_db_name = None
-	mysql_conn_opts = dict()
+	mysql_conn_opts = None
 	mysql_sql_mode = 'strict_all_tables'
 
 	serw_api_url = 'https://api.southeasternrailway.co.uk'
@@ -238,6 +241,11 @@ def iter_range(a, b, step):
 		yield v
 		if v == b: break
 		v += step
+
+def random_weight(items):
+	if isinstance(items, dict): items = items.items()
+	keys, weights = zip(*items)
+	return random.choices(keys, weights)[0]
 
 popn = lambda v,n: list(v.pop() for m in range(n))
 url_to_fn = lambda p: p.replace('/', '-').replace('.', '_')
@@ -610,7 +618,7 @@ class GWCAPISerw:
 				err, = err
 				err = err.get('failureType'), err['errorCode']
 			except: raise GWCAPIError(res.status, err)
-			if err not in serw_error_skip:
+			if err not in self.conf.serw_error_skip:
 				raise GWCAPIErrorCode(res.status, *err)
 		elif isinstance(data, dict) and 'result' not in data:
 			raise GWCAPIError(res.status, f'no "result" key in data - {data!r}')
@@ -778,7 +786,7 @@ class GWCTestRunner:
 
 		self.db_conns, self.db_cursors = dict(), dict()
 		self.db_pool = await self.ctx.enter(
-			aiomysql.create_pool(charset='utf8mb4', **self.conf.mysql_conn_opts) )
+			aiomysql.create_pool(charset='utf8mb4', **(self.conf.mysql_conn_opts or dict())) )
 		self.c = await self.connect()
 		self.db = self.db_conns[None]
 
@@ -859,6 +867,29 @@ class GWCTestRunner:
 				exc_list.append(res.exc)
 			else: raise GWCTestBatchFail(*exc_list)
 		else: raise ValueError(tm)
+
+
+	def pick_dates(self, dates):
+		'Pick dates to test according to weights in conf.test_pick_date.'
+		dates, weights = list(dates), self.conf.test_pick_date or dict(seq=1)
+		dates_pick, dates_iter = list(), iter(dates)
+		dates_holidays = (self.conf.bank_holidays or set()).intersection(dates)
+		while len(dates_pick) < min(len(dates), self.conf.test_trip_dates):
+			pick = random_weight(weights)
+			if pick == 'seq':
+				for date in dates_iter:
+					if date not in dates_pick: break
+				dates_pick.append(date)
+			elif pick == 'bank_holiday':
+				if not dates_holidays: continue
+				dates_pick.append(dates_holidays.pop())
+			elif pick == 'random':
+				while True:
+					date = random.choice(list(set(dates).difference(dates_pick)))
+					if date not in dates_pick: break
+				dates_pick.append(date)
+			else: raise ValueError(pick)
+		return dates_pick
 
 
 	async def get_trips(self):
@@ -949,7 +980,7 @@ class GWCTestRunner:
 			dates.update(span.date_iter())
 			dates = list(it.dropwhile(lambda date: not ( date > date_current
 				or (date == date_current and time0 > time_current) ), sorted(dates)))
-			dates = dates[:self.conf.test_trip_days]
+			dates = self.pick_dates(dates)
 			if not dates:
 				stats['trip-skip-past'] += 1
 				continue
@@ -1033,6 +1064,13 @@ def main(args=None, conf=None):
 		help='Name of "[group]" (ini section) in ~/.my.cnf ini file to use parameters from.')
 
 	group = parser.add_argument_group('Extra data sources')
+	group.add_argument('--bank-holiday-list',
+		metavar='file', default='doc/UK-bank-holidays.csv',
+		help='List of dates, one per line, for bank holidays,'
+			' used only for testing priorities. Default: %(default)s')
+	group.add_argument('--bank-holiday-fmt',
+		metavar='strptime-format', default='%d-%b-%Y',
+		help='strptime() format for each line in --bank-holiday-list file. Default: %(default)s')
 	group.add_argument('--serw-crs-nlc-csv',
 		metavar='file', default='doc/UK-stations-crs-nlc.csv',
 		help='UK crs-to-nlc station code mapping table ("crs,nlc" csv file).'
@@ -1101,6 +1139,12 @@ def main(args=None, conf=None):
 		if opts.test_train_limit:
 			conf.test_train_uids = conf.test_train_uids[:opts.test_train_limit]
 	else: conf.test_train_uids = opts.test_train_limit
+
+	if opts.bank_holiday_list:
+		conf.bank_holidays = set()
+		with pathlib.Path(opts.bank_holiday_list).open() as src:
+			for line in src.read().splitlines():
+				conf.bank_holidays.add(dt.datetime.strptime(line, opts.bank_holiday_fmt).date())
 
 	if opts.debug_http_dir: conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
 	if opts.debug_cache_dir: conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
