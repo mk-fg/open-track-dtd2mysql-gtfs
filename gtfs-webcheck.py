@@ -25,6 +25,8 @@ class TestConfig:
 	# "seq" in all of these is a simple sequential pick.
 	test_pick_trip = dict(seq=1, assoc=0.5, z=0.2)
 	test_pick_date = dict(seq=1, bank_holiday=2, random=2)
+	test_pick_special = None # use named iterator func for special trip/date selection
+	test_pick_special_iters = {'bank-holidays-only': 'holidays'}
 
 	## test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
 	test_train_uids = None
@@ -61,7 +63,7 @@ class TestConfig:
 		('Warning', 'IptisNrsError'), ('Warning', 'IptisNoRealTimeDataAvailable') }
 	serw_api_debug = False
 
-	rate_interval = 3 # seconds
+	rate_interval = 1 # seconds
 	rate_max_concurrency = 1
 	rate_min_seq_delay = 0 # seconds, only if rate_max_concurrency=1
 
@@ -223,6 +225,7 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 		Use e.g. coro.send([result-size={:,}, res_size]) on each iteration.
 		These messages will only be formatted and
 			logged "steps" times, evenly spaced thru n_max iterations.'''
+	if n_max is None: return iter(it.repeat(None))
 	steps, ts_start = min(n_max, steps), time.time()
 	step_n = steps and n_max / steps
 	msg_tpl = ( '[{{}}] Step {{:>{0}.0f}}'
@@ -894,35 +897,36 @@ class GWCTestRunner:
 		else: raise ValueError(tm)
 
 
-	async def _pick_trips(self):
+	async def _pick_trips(self, weights=None, pick_uids=None):
+		weights = weights or self.conf.test_pick_trip or dict(seq=1)
+
 		trip_id_skip = ( '1' if not self.trip_skip else
 			f'trip_id NOT IN ({",".join(map(self.escape, self.trip_skip))})' )
 		pick_checks = dict( seq='1',
 			assoc=r"trip_headsign LIKE '%%\_%%'",
 			z="trip_headsign LIKE 'Z%%'" )
-		if set(self.conf.test_pick_trip).difference(pick_checks):
-			raise ValueError(self.conf.test_pick_trip)
+		if set(weights).difference(pick_checks): raise ValueError(weights)
 
 		train_uid_check = '1'
-		if isinstance(self.conf.test_train_uids, int):
+		if isinstance(pick_uids, int):
 			train_uid_checks = dict()
 			for k,c in pick_checks.items():
 				train_uid_set = set(await self.qb(f'''
 					SELECT trip_headsign FROM trips
 					WHERE {c} GROUP BY trip_headsign
-					LIMIT {self.conf.test_train_uids}''', flat=True))
+					LIMIT {pick_uids}''', flat=True))
 				train_uid_checks[k] = train_uid_set
 			train_uid_set, n = set(), sum(map(len, train_uid_checks.values()))
-			while len(train_uid_set) < self.conf.test_train_uids and n > 0:
-				pick = random_weight(self.conf.test_pick_trip, train_uid_checks)
+			while len(train_uid_set) < pick_uids and n > 0:
+				pick = random_weight(weights, train_uid_checks)
 				try: train_uid_set.add(train_uid_checks[pick].pop())
 				except KeyError: continue
 				n -= 1
 			train_uid_check = ( '0' if not train_uid_set else
 				f'trip_headsign NOT IN ({",".join(map(self.escape, train_uid_set))})' )
-		elif self.conf.test_train_uids:
+		elif pick_uids:
 			train_uid_check = ( 'trip_headsign IN '
-				f'({",".join(map(self.escape, set(self.conf.test_train_uids)))})' )
+				f'({",".join(map(self.escape, set(pick_uids)))})' )
 
 		trip_count = (await self.qb(
 			'SELECT COUNT(DISTINCT trip_id) FROM ({}) u'.format(
@@ -939,7 +943,7 @@ class GWCTestRunner:
 			for k,c in pick_checks.items() )
 
 		while trip_iters:
-			pick = random_weight(self.conf.test_pick_trip, trip_iters)
+			pick = random_weight(weights, trip_iters)
 			try: t = await anext(trip_iters[pick])
 			except AsyncStopIteration:
 				del trip_iters[pick]
@@ -950,7 +954,7 @@ class GWCTestRunner:
 
 	async def pick_trips(self):
 		self.stats['trip-skip-set-init'] = len(self.trip_skip)
-		trips = self._pick_trips()
+		trips = self._pick_trips(pick_uids=self.conf.test_train_uids)
 		yield (await anext(trips)) # trip count
 		async for t, stops in trips:
 			# Same trip_id can be yielded by
@@ -959,9 +963,9 @@ class GWCTestRunner:
 			yield t, stops
 			self.trip_skip.add(t.trip_id)
 
-	def pick_dates(self, dates):
+	def pick_dates(self, dates, weights=None):
 		'Pick dates to test according to weights in conf.test_pick_date.'
-		dates, weights = list(dates), self.conf.test_pick_date or dict(seq=1)
+		dates, weights = list(dates), weights or self.conf.test_pick_date or dict(seq=1)
 		if not dates: return dates
 		dates_pick, dates_iter = list(), iter(dates)
 		dates_holidays = (self.conf.bank_holidays or set()).intersection(dates)
@@ -972,7 +976,9 @@ class GWCTestRunner:
 					if date not in dates_pick: break
 				dates_pick.append(date)
 			elif pick == 'bank_holiday':
-				if not dates_holidays: continue
+				if not dates_holidays:
+					if len(weights) == 1: break # to avoid inf-loop
+					continue
 				dates_pick.append(dates_holidays.pop())
 			elif pick == 'random':
 				while True:
@@ -983,18 +989,36 @@ class GWCTestRunner:
 		return dates_pick
 
 
+	# async def pick_trips_holidays(self):
+	# 	pick_uids = self.conf.test_train_uids
+	# 	if pick_uids and not isinstance(pick_uids, int):
+	# 		async for v in self.pick_trips(pick_uids=pick_uids): yield v
+	# 		return
+	# 	trips = self._pick_trips(dict(seq=1))
+	# 	yield None # trip count is not known in advance here
+	# 	async for t, stops in trips: yield t, stops
+
+	def pick_dates_holidays(self, dates):
+		return self.pick_dates(dates, weights=dict(bank_holiday=1))
+
+
 	async def run(self):
 		self.stats = collections.Counter()
 		self.stats['diff-total'] = 0
 
-		# XXX: loop until some coverage level
-		# XXX: ordering - pick diff types of schedules, train_uids, etc
+		pick_funcs = pick_funcs_base = 'pick_trips', 'pick_dates'
+		if self.conf.test_pick_special:
+			pick_funcs = (f'{v}_{self.conf.test_pick_special}' for v in pick_funcs)
+		pick_trips, pick_dates = (
+			getattr(self, k, getattr(self, k0))
+			for k,k0 in zip(pick_funcs, pick_funcs_base) )
 
-		trips = self.pick_trips()
+		trips = pick_trips()
 		trip_count = await anext(trips)
-		progress = progress_iter(self.log, 'trips', trip_count)
+
 		self.stats['trip-count'] = trip_count
 		self.log.debug('Checking {} trip(s)...', trip_count)
+		progress = progress_iter(self.log, 'trips', trip_count)
 
 		async for t, stops in trips:
 			next(progress)
@@ -1042,7 +1066,7 @@ class GWCTestRunner:
 				or (date == date_current and time0 > time_current) ), sorted(dates)))
 			dates = dates[:bisect.bisect_left( dates,
 				dt.date.today() + dt.timedelta(self.conf.date_max_future_offset) )]
-			dates = self.pick_dates(dates)
+			dates = pick_dates(dates)
 			if not dates:
 				self.log.debug('[trip={}] no valid dates to check, skipping', trip_id)
 				self.stats['trip-skip-past'] += 1
@@ -1130,6 +1154,9 @@ def main(args=None, conf=None):
 		help='Randomly pick specified number of distinct train_uids for testing, ignoring all others.')
 	group.add_argument('-u', '--test-train-uid', metavar='uid-list',
 		help='Test entries for specified train_uid only. Multiple values are split by spaces.')
+	group.add_argument('-t', '--test-special',
+		metavar='name', choices=conf.test_pick_special_iters,
+		help='Use special named trip/date selection iterators. Choices: %(choices)s')
 
 	group = parser.add_argument_group('MySQL db parameters')
 	group.add_argument('-d', '--gtfs-db-name',
@@ -1234,6 +1261,9 @@ def main(args=None, conf=None):
 		if opts.test_train_limit:
 			conf.test_train_uids = conf.test_train_uids[:opts.test_train_limit]
 	else: conf.test_train_uids = opts.test_train_limit
+
+	if opts.test_special:
+		conf.test_pick_special = conf.test_pick_special_iters[opts.test_special]
 
 	if opts.debug_http_dir: conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
 	if opts.debug_cache_dir: conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
