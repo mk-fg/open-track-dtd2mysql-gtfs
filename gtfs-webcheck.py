@@ -837,10 +837,12 @@ class GWCTestRunner:
 		await c.execute(q, params)
 		async for row in c: yield row
 
-	async def qb(self, q, *params, c=None, **kws):
+	async def qb(self, q, *params, c=None, flat=False, **kws):
 		c = self.c if not c else (self.db_cursors.get(c) or await self.connect(c))
 		await c.execute(q, params)
-		return await c.fetchall()
+		data = await c.fetchall()
+		if flat: data = list(map(op.itemgetter(0), data))
+		return data
 
 	def escape(self, val):
 		return self.db.escape(val)
@@ -891,81 +893,72 @@ class GWCTestRunner:
 
 
 	async def _pick_trips(self):
-		test_train_uids = self.conf.test_train_uids
-		if isinstance(test_train_uids, int):
-			test_train_uids = set(map(op.itemgetter(0), await self.qb(
-				'SELECT trip_headsign FROM trips GROUP BY trip_headsign LIMIT %s', test_train_uids )))
-		else: test_train_uids = set(test_train_uids)
-		if test_train_uids:
-			train_uid_join = ','.join(map(self.escape, test_train_uids))
-			train_uid_join = f'''
-				JOIN
-					( SELECT trip_headsign
-						FROM trips
-						WHERE trip_headsign IN ({train_uid_join})
-						GROUP BY trip_headsign ) r
-					USING(trip_headsign)'''
-		else: train_uid_join = ''
+		trip_id_skip = ( '1' if not self.trip_skip else
+			f'trip_id NOT IN ({",".join(map(self.escape, self.trip_skip))})' )
+		pick_checks = dict( seq='1',
+			assoc=r"trip_headsign LIKE '%%\_%%'",
+			z="trip_headsign LIKE 'Z%%'" )
+		if set(self.conf.test_pick_trip).difference(pick_checks):
+			raise ValueError(self.conf.test_pick_trip)
 
-		trip_ids = await self.qb(
-			f'SELECT trip_id FROM trips t {train_uid_join}' )
-		yield map(op.itemgetter(0), trip_ids)
+		train_uid_check = '1'
+		if isinstance(self.conf.test_train_uids, int):
+			train_uid_checks = dict()
+			for k,c in pick_checks.items():
+				train_uid_set = set(await self.qb(f'''
+					SELECT trip_headsign FROM trips
+					WHERE {c} GROUP BY trip_headsign
+					LIMIT {self.conf.test_train_uids}''', flat=True))
+				train_uid_checks[k] = train_uid_set
+			train_uid_set, n = set(), sum(map(len, train_uid_checks.values()))
+			while len(train_uid_set) < self.conf.test_train_uids and n > 0:
+				pick = random_weight(self.conf.test_pick_trip, train_uid_checks)
+				try: train_uid_set.add(train_uid_checks[pick].pop())
+				except KeyError: continue
+				n -= 1
+			train_uid_check = ( '0' if not train_uid_set else
+				f'trip_headsign NOT IN ({",".join(map(self.escape, train_uid_set))})' )
+		elif self.conf.test_train_uids:
+			train_uid_check = ( 'trip_headsign NOT IN '
+				f'({",".join(map(self.escape, set(self.conf.test_train_uids)))})' )
+
+		trip_count = (await self.qb(
+			'SELECT COUNT(DISTINCT trip_id) FROM ({}) u'.format(
+				' UNION '.join( f'''( SELECT trip_id FROM trips
+					WHERE {c} AND {trip_id_skip} AND {train_uid_check} )'''
+				for k,c in pick_checks.items() )) ))[0][0]
+		yield trip_count
 
 		q_base = f'''
-			SELECT %s AS t, t.*, st.*
-			FROM trips t
-			{train_uid_join}
-			LEFT JOIN stop_times st USING(trip_id)
-			{{}}
-			ORDER BY t.trip_id, st.stop_sequence'''
+			SELECT %s AS t, t.* FROM trips t WHERE {{c}} AND
+			{trip_id_skip} AND {train_uid_check} ORDER BY t.trip_id'''
 		trip_iters = dict(
-			(k, self.q(q_base.format(check), k, c=f'trips_{k}'))
-			for k, check in dict( seq='',
-				assoc=r"WHERE trip_headsign LIKE '%%\_%%'",
-				z="WHERE trip_headsign LIKE 'Z%%'" ).items() )
-		trip_buffs = dict.fromkeys(trip_iters, (..., None))
-		if set(self.conf.test_pick_trip).difference(trip_iters):
-			raise ValueError(self.conf.test_pick_trip)
+			(k, self.q(q_base.format(c=c), k, c=f'trips_{k}'))
+			for k,c in pick_checks.items() )
 
 		while trip_iters:
 			pick = random_weight(self.conf.test_pick_trip, trip_iters)
-			stops_trip_id, stops = trip_buffs[pick]
-			while True:
-				try:
-					t = await anext(trip_iters[pick])
-					trip_id, train_uid, stop = t.trip_id, t.trip_headsign, t
-				except AsyncStopIteration:
-					trip_id = train_uid = stop = None
-					del trip_iters[pick]
-				else:
-					if ( train_uid and test_train_uids is not None
-						and train_uid not in test_train_uids ): continue
-				if trip_id != stops_trip_id:
-					trip_buffs[pick] = trip_id, [stop]
-					if stops:
-						yield stops
-						if test_train_uids is not None:
-							test_train_uids.discard(stops[0].trip_headsign)
-						break
-					elif not trip_id: break
-					stops_trip_id, stops = trip_buffs[pick]
-				else: stops.append(stop)
+			try: t = await anext(trip_iters[pick])
+			except AsyncStopIteration:
+				del trip_iters[pick]
+				continue
+			stops = await self.qb( 'SELECT * FROM'
+				' stop_times WHERE trip_id = %s', t.trip_id )
+			if stops: yield t, stops
 
 	async def pick_trips(self):
 		self.stats['trip-skip-set-init'] = len(self.trip_skip)
 		trips = self._pick_trips()
-
-		trip_ids = await anext(trips)
-		yield len(set(trip_ids).difference(self.trip_skip))
-
-		async for stops in trips:
-			trip_id = stops[0].trip_id
-			if trip_id in self.trip_skip:
-				self.stats['trip-skip-set'] += 1
-				continue
-			yield stops
-			self.trip_skip.add(trip_id)
-			if self.trip_log: self.trip_log.write(f'{trip_id}\n')
+		yield (await anext(trips)) # trip count
+		async for t, stops in trips:
+			# Same trip_id can be yielded by
+			#  different iterators, hence additional check here
+			if t.trip_id in self.trip_skip: continue
+			yield t, stops
+			self.trip_skip.add(t.trip_id)
+			if self.trip_log:
+				self.trip_log.write(f'{t.trip_id}\n')
+				self.trip_log.flush()
 
 	def pick_dates(self, dates):
 		'Pick dates to test according to weights in conf.test_pick_date.'
@@ -1002,11 +995,10 @@ class GWCTestRunner:
 		progress = progress_iter(self.log, 'trips', trip_count)
 		self.stats['trip-count'] = trip_count
 
-		async for stops in trips:
+		async for t, stops in trips:
 			ts = dt.datetime.now()
 			date_current, time_current = ts.date(), ts.time()
-			trip_id, train_uid, service_id = op.attrgetter(
-				'trip_id', 'trip_headsign', 'service_id' )(stops[0])
+			trip_id, train_uid, service_id = t.trip_id, t.trip_headsign, t.service_id
 			self.log.debug(
 				'Checking trip: id={} train_uid={} service_id={}',
 				trip_id, train_uid, service_id )
@@ -1054,6 +1046,7 @@ class GWCTestRunner:
 			# Check produced trip info against API(s)
 			self.stats['trip-check'] += 1
 			for date in dates:
+				self.log.debug('[trip={}] checking date: {}', trip_id, date)
 				ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
 				self.stats['trip-check-date'] += 1
 				try: await self.check_trip(trip, ts_start=ts_src)
