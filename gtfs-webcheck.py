@@ -4,7 +4,8 @@ import itertools as it, operator as op, functools as ft
 import datetime as dt
 import os, sys, pathlib, signal, locale, warnings
 import contextlib, inspect, collections, enum, time
-import asyncio, urllib.parse, json, re, random, secrets
+import asyncio, urllib.parse, json, re
+import random, secrets, bisect
 import textwrap, pprint, logging, logging.handlers
 
 import aiohttp # http://aiohttp.readthedocs.io
@@ -38,6 +39,7 @@ class TestConfig:
 	test_trip_time_slack = 5*60 # max diff in stop times
 
 	trip_diff_cmd = 'diff -uw' # for pretty-printing diffs between trip stops
+	date_max_future_offset = 80 # don't pick future dates further than that
 	bank_holidays = None
 
 	mysql_db_name = None
@@ -963,6 +965,7 @@ class GWCTestRunner:
 	def pick_dates(self, dates):
 		'Pick dates to test according to weights in conf.test_pick_date.'
 		dates, weights = list(dates), self.conf.test_pick_date or dict(seq=1)
+		if not dates: return dates
 		dates_pick, dates_iter = list(), iter(dates)
 		dates_holidays = (self.conf.bank_holidays or set()).intersection(dates)
 		while len(dates_pick) < min(len(dates), self.conf.test_trip_dates):
@@ -1038,8 +1041,11 @@ class GWCTestRunner:
 			dates.update(span.date_iter())
 			dates = list(it.dropwhile(lambda date: not ( date > date_current
 				or (date == date_current and time0 > time_current) ), sorted(dates)))
+			dates = dates[:bisect.bisect_left( dates,
+				dt.date.today() + dt.timedelta(self.conf.date_max_future_offset) )]
 			dates = self.pick_dates(dates)
 			if not dates:
+				self.log.debug('[trip={}] no valid dates to check, skipping', trip_id)
 				self.stats['trip-skip-past'] += 1
 				continue
 
