@@ -921,7 +921,7 @@ class GWCTestRunner:
 			train_uid_check = ( '0' if not train_uid_set else
 				f'trip_headsign NOT IN ({",".join(map(self.escape, train_uid_set))})' )
 		elif self.conf.test_train_uids:
-			train_uid_check = ( 'trip_headsign NOT IN '
+			train_uid_check = ( 'trip_headsign IN '
 				f'({",".join(map(self.escape, set(self.conf.test_train_uids)))})' )
 
 		trip_count = (await self.qb(
@@ -997,8 +997,10 @@ class GWCTestRunner:
 		trip_count = await anext(trips)
 		progress = progress_iter(self.log, 'trips', trip_count)
 		self.stats['trip-count'] = trip_count
+		self.log.debug('Checking {} trip(s)...', trip_count)
 
 		async for t, stops in trips:
+			next(progress)
 			ts = dt.datetime.now()
 			date_current, time_current = ts.date(), ts.time()
 			trip_id, train_uid, service_id = t.trip_id, t.trip_headsign, t.service_id
@@ -1115,7 +1117,7 @@ def main(args=None, conf=None):
 			help='Log line format for --diff-log for python stdlib logging module.')
 	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
 		help='Randomly pick specified number of distinct train_uids for testing, ignoring all others.')
-	group.add_argument('--test-train-uid', metavar='uid-list',
+	group.add_argument('-u', '--test-train-uid', metavar='uid-list',
 		help='Test entries for specified train_uid only. Multiple values are split by spaces.')
 
 	group = parser.add_argument_group('MySQL db parameters')
