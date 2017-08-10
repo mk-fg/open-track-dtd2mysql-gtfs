@@ -207,6 +207,18 @@ class LogStyleAdapter(logging.LoggerAdapter):
 		msg, kws = self.process(msg, kws)
 		self.logger._log(level, LogMessage(msg, args, kws), (), log_kws)
 
+class LogPrefixAdapter(LogStyleAdapter):
+	def __init__(self, logger, prefix=None, prefix_raw=False, extra=None):
+		if isinstance(logger, str): logger = get_logger(logger)
+		if isinstance(logger, logging.LoggerAdapter): logger = logger.logger
+		super(LogPrefixAdapter, self).__init__(logger, extra or {})
+		if not prefix: prefix = get_uid()
+		if not prefix_raw: prefix = '[{}] '.format(prefix)
+		self.prefix = prefix
+	def process(self, msg, kws):
+		super(LogPrefixAdapter, self).process(msg, kws)
+		return ('{}{}'.format(self.prefix, msg), kws)
+
 def log_lines(log_func, lines, log_func_last=False):
 	if isinstance(lines, str):
 		lines = list(line.rstrip() for line in lines.rstrip().split('\n'))
@@ -989,15 +1001,6 @@ class GWCTestRunner:
 		return dates_pick
 
 
-	# async def pick_trips_holidays(self):
-	# 	pick_uids = self.conf.test_train_uids
-	# 	if pick_uids and not isinstance(pick_uids, int):
-	# 		async for v in self.pick_trips(pick_uids=pick_uids): yield v
-	# 		return
-	# 	trips = self._pick_trips(dict(seq=1))
-	# 	yield None # trip count is not known in advance here
-	# 	async for t, stops in trips: yield t, stops
-
 	def pick_dates_holidays(self, dates):
 		return self.pick_dates(dates, weights=dict(bank_holiday=1))
 
@@ -1025,9 +1028,7 @@ class GWCTestRunner:
 			ts = dt.datetime.now()
 			date_current, time_current = ts.date(), ts.time()
 			trip_id, train_uid, service_id = t.trip_id, t.trip_headsign, t.service_id
-			self.log.debug(
-				'Checking trip: id={} train_uid={} service_id={}',
-				trip_id, train_uid, service_id )
+			log_trip = LogPrefixAdapter(self.log, f'{train_uid}.{trip_id}.{service_id}')
 
 			# Find first/last public pickup/dropoff stops for a trip
 			test_stops, buff = list(), list()
@@ -1068,15 +1069,15 @@ class GWCTestRunner:
 				dt.date.today() + dt.timedelta(self.conf.date_max_future_offset) )]
 			dates = pick_dates(dates)
 			if not dates:
-				self.log.debug('[trip={}] no valid dates to check, skipping', trip_id)
-				self.stats['trip-skip-past'] += 1
+				log_trip.debug('no valid dates to check, skipping')
+				self.stats['trip-skip-dates'] += 1
 				continue
 
 			# Check produced trip info against API(s)
 			self.stats['trip-check'] += 1
 			trip_diffs = list()
 			for date in dates:
-				self.log.debug('[trip={}] checking date: {}', trip_id, date)
+				log_trip.debug('checking date: {}', date)
 				ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
 				self.stats['trip-check-date'] += 1
 				try: await self.check_trip(trip, ts_start=ts_src)
@@ -1196,6 +1197,7 @@ def main(args=None, conf=None):
 			' Supported types correspond to implemented GWCTestFail'
 				' exceptions, e.g.: NoJourney, StopNotFound, StopMismatch.'
 			' Multiple values can be specified in one space-separated arg.')
+	group.add_argument('--debug-rng-seed', help='Random number generator seed.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -1268,6 +1270,7 @@ def main(args=None, conf=None):
 	if opts.debug_http_dir: conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
 	if opts.debug_cache_dir: conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
 	if opts.debug_trigger_mismatch: conf.debug_trigger_mismatch = opts.debug_trigger_mismatch
+	if opts.debug_rng_seed: random.seed(opts.debug_rng_seed)
 
 	log.debug('Starting run_tests loop...')
 	with contextlib.closing(asyncio.get_event_loop()) as loop:
