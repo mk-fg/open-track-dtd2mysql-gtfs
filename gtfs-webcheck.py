@@ -958,9 +958,6 @@ class GWCTestRunner:
 			if t.trip_id in self.trip_skip: continue
 			yield t, stops
 			self.trip_skip.add(t.trip_id)
-			if self.trip_log:
-				self.trip_log.write(f'{t.trip_id}\n')
-				self.trip_log.flush()
 
 	def pick_dates(self, dates):
 		'Pick dates to test according to weights in conf.test_pick_date.'
@@ -1053,24 +1050,38 @@ class GWCTestRunner:
 
 			# Check produced trip info against API(s)
 			self.stats['trip-check'] += 1
+			trip_diffs = list()
 			for date in dates:
 				self.log.debug('[trip={}] checking date: {}', trip_id, date)
 				ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
 				self.stats['trip-check-date'] += 1
 				try: await self.check_trip(trip, ts_start=ts_src)
 				except GWCTestBatchFail as err_batch:
-					self.stats['diff-total'] += 1
 					for err in err_batch.exc_list:
 						err_type = err.__class__.__name__
 						if not isinstance(err, GWCTestFail):
-							self.log.error('Failed to check trip: {} - [{}] {}', trip, err_type, err)
-							raise err from None
-						self.stats[f'diff-api-{err.api}'] += 1
+							try: raise err from None
+							except Exception as err:
+								log_lines(
+									self.log.error, log_func_last=self.log.exception,
+									lines=[ 'Unexpected error during trip check [BUG]',
+										('  trip: {}', trip), ('  error: [{}] {}', err_type, err) ])
+							err_api, err_type, err = 'core', 'bug', None
+						else: err_api = err.api
+						trip_diffs.append(f'{err_api}.{err_type}')
+						self.stats[f'diff-api-{err_api}'] += 1
 						self.stats[f'diff-type-{err_type}'] += 1
-						log_lines(self.log_diffs.error, [
-							('API [{}] data mismatch for gtfs trip: {}', err.api, err_type),
-							('Trip: {}', trip), ('Date/time: {}', ts_src), 'Diff details:',
-							*textwrap.indent(err.diff or pformat_data(err.data), '  ').splitlines() ])
+						if err:
+							log_lines(self.log_diffs.error, [
+								('API [{}] data mismatch for gtfs trip: {}', err_api, err_type),
+								('Trip: {}', trip), ('Date/time: {}', ts_src), 'Diff details:',
+								*textwrap.indent(err.diff or pformat_data(err.data), '  ').splitlines() ])
+			self.stats['diff-total'] += len(trip_diffs)
+
+			if self.trip_log:
+				trip_diffs = '-match-' if not trip_diffs else ':'.join(sorted(set(trip_diffs)))
+				self.trip_log.write(f'{t.trip_id} {trip_diffs}\n')
+				self.trip_log.flush()
 
 		log_lines(self.log.debug, ['Stats:', *(
 			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
