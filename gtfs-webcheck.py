@@ -1135,8 +1135,8 @@ def main(args=None, conf=None):
 	group = parser.add_argument_group('Extra data sources')
 	group.add_argument('--bank-holiday-list',
 		metavar='file', default='doc/UK-bank-holidays.csv',
-		help='List of dates, one per line, for bank holidays,'
-			' used only for testing priorities. Default: %(default)s')
+		help='List of dates, one per line, for bank holidays, used only'
+			' for testing priorities, "-" or empty value to disable. Default: %(default)s')
 	group.add_argument('--bank-holiday-fmt',
 		metavar='strptime-format', default='%d-%b-%Y',
 		help='strptime() format for each line in --bank-holiday-list file. Default: %(default)s')
@@ -1202,11 +1202,15 @@ def main(args=None, conf=None):
 					log.warning('Failed to process "crs,nlc" csv line: {!r} [{}]', line, n)
 		conf.serw_crs_nlc_map = crs_nlc_map
 
-	if opts.bank_holiday_list:
+	if opts.bank_holiday_list and opts.bank_holiday_list != '-':
 		conf.bank_holidays = set()
-		with pathlib.Path(opts.bank_holiday_list).open() as src:
-			for line in src.read().splitlines():
-				conf.bank_holidays.add(dt.datetime.strptime(line, opts.bank_holiday_fmt).date())
+		p = pathlib.Path(opts.bank_holiday_list)
+		if not p.exists():
+			log.warning('Missing bank holiday list file (use "-" or empty to disable): {}', p)
+		else:
+			with p.open() as src:
+				for line in src.read().splitlines():
+					conf.bank_holidays.add(dt.datetime.strptime(line, opts.bank_holiday_fmt).date())
 
 	conf.mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
 		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
