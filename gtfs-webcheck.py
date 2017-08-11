@@ -1074,6 +1074,8 @@ class GWCTestRunner:
 					if s.drop_off_type == GTFSEmbarkType.none: continue
 					test_stops.extend(buff)
 					buff.clear()
+			if len(test_stops) >= 2 and test_stops[0].stop_id == test_stops[-1].stop_id:
+				test_stops = test_stops[:-1] # to avoid OriginDestinationSame error
 			if len(test_stops) < 2:
 				self.stats['trip-skip-no-public-stops'] += 1
 				continue
