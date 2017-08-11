@@ -397,13 +397,18 @@ GTFSEmbarkType = enum.IntEnum('EmbarkType', 'regular none phone driver', start=0
 GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 
 def dts_to_dt(dts, date=None):
+	dts0 = dts
 	if isinstance(dts, dt.timedelta): dts = dts.total_seconds()
 	if isinstance(dts, dt.datetime):
 		dts = dts.time()
 		dts = dts.hour * 3600 + dts.minute * 60 + dts.second
 	dts = int(dts)
-	ts = dt.time(dts // 3600, (dts % 3600) // 60, dts % 60, dts % 1)
-	if date: ts = dt.datetime.combine(date, ts)
+	days, hours = divmod(dts // 3600, 24)
+	ts = dt.time(hours, (dts % 3600) // 60, dts % 60, dts % 1)
+	if date:
+		if days: date += dt.timedelta(days)
+		ts = dt.datetime.combine(date, ts)
+	elif days: raise ValueError(f'>24h time: {dts0}')
 	return ts
 
 
