@@ -341,7 +341,9 @@ class RateSemaphore:
 				self.ts += self.s2s - delay
 				return
 			try: await asyncio.sleep(delay)
-			except asyncio.CancelledError: self.queue.release()
+			except asyncio.CancelledError:
+				self.queue.release()
+				raise
 
 	def release(self):
 		self.queue.release()
@@ -755,7 +757,10 @@ class GWCAPISerw:
 		for jp_url in jp_urls:
 			jn_sig = GWCJnSig.from_serw_url(jp_url.rsplit('/', 1)[-1])
 			cps = await self.api_call('get', f'{jp_url}/calling-points')
-			journeys.append(GWCJn.from_serw_cps(jn_sig, cps))
+			try: journeys.append(GWCJn.from_serw_cps(jn_sig, cps))
+			except Exception as err:
+				raise GWCError( f'Failed to parse journey info:'
+					f' [{err.__class__.__name__}] {err}', err, jn_sig, cps )
 		return journeys
 
 
@@ -916,6 +921,13 @@ class GWCTestRunner:
 			else: raise GWCTestBatchFail(*exc_list)
 		else: raise ValueError(tm)
 
+	def trip_log_update(self, t, result=None):
+		if not self.trip_log: return
+		line = f'{t.trip_id} uid={t.trip_headsign}'
+		if result: line += f' {result}'
+		self.trip_log.write(f'{line}\n')
+		self.trip_log.flush()
+
 
 	async def _pick_trips(self, weights=None, pick_uids=None):
 		weights = weights or self.conf.test_pick_trip or dict(seq=1)
@@ -926,6 +938,7 @@ class GWCTestRunner:
 			assoc=r"trip_headsign LIKE '%%\_%%'",
 			z="trip_headsign LIKE 'Z%%'" )
 		if set(weights).difference(pick_checks): raise ValueError(weights)
+		for k in set(pick_checks).difference(weights): del pick_checks[k]
 
 		train_uid_check = '1'
 		if isinstance(pick_uids, int):
@@ -1077,8 +1090,9 @@ class GWCTestRunner:
 				dt.date.today() + dt.timedelta(self.conf.date_max_future_offset) )]
 			dates = pick_dates(dates)
 			if not dates:
-				log_trip.debug('no valid dates to check, skipping')
+				# log_trip.debug('no valid dates to check, skipping')
 				self.stats['trip-skip-dates'] += 1
+				self.trip_log_update(t, '-skip-')
 				continue
 
 			# Check produced trip info against API(s)
@@ -1113,8 +1127,7 @@ class GWCTestRunner:
 
 			if self.trip_log:
 				trip_diffs = '-match-' if not trip_diffs else ':'.join(sorted(set(trip_diffs)))
-				self.trip_log.write(f'{t.trip_id} {trip_diffs}\n')
-				self.trip_log.flush()
+				self.trip_log_update(t, trip_diffs)
 
 		log_lines(self.log.debug, ['Stats:', *(
 			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)

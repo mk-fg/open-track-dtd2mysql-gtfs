@@ -112,8 +112,10 @@ Usage examples
     % pip3 install --user aiohttp aiomysql
 
     % ./gtfs-webcheck.py --debug -d gtfs_py -n10
+    % ./gtfs-webcheck.py --debug -d gtfs_py -u C04612
 
-  ``-n10`` will limit testing to 10 arbitrary trains.
+  ``-n10`` will limit testing to 10 arbitrary trains, ``-u C04612`` checks
+  specific train_uid (matching it from gtfs trip_headsign field).
 
   For longer runs, see --trip-id-log/--diff-log parameters, rate-limiting, as
   well as other configuration params, most of which are only available in
