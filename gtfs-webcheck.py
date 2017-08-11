@@ -794,11 +794,12 @@ class GWCAPISerw:
 			else: raise GWCTestFailNoJourney(self.api_tag, trip, jns)
 
 			## Match all stops/stop-times
-			# SERW API returns non-public stops, which are missing in gtfs
+			# SERW API returns non-public stops (often duplicated), which are missing in gtfs
 			jn_stops_iter, mismatch_n = iter(jn_trip.stops), random.randrange(0, len(trip.stops))
 			for n, st1 in enumerate(trip.stops):
 				if n == mismatch_n and 'stopnotfound' in fail: st1.crs += 'x'
 				for st2 in jn_stops_iter:
+					if not st2.ts: continue # possible non-public duplicate before public one
 					if st1.crs == st2.crs: break
 					if st2.ts:
 						raise GWCTestFailStopNotFound(
@@ -808,7 +809,8 @@ class GWCAPISerw:
 						self.api_tag, trip, [jn_trip, st1], diff=self.format_trip_diff(trip, jn_trip) )
 				if n == mismatch_n and 'stopmismatch' in fail:
 					st1.ts = st2.ts + dt.timedelta(seconds=self.conf.test_trip_time_slack + 5*60)
-				ts_diff = abs(st1.ts.total_seconds() - st2.ts.total_seconds())
+				ts1, ts2 = ((0 if not st.ts else st.ts.total_seconds()) for st in [st1, st2])
+				ts_diff = abs(ts1 - ts2)
 				if ts_diff > self.conf.test_trip_time_slack:
 					raise GWCTestFailStopMismatch( self.api_tag, trip,
 						diff=self.format_trip_diff(trip, jn_trip),
