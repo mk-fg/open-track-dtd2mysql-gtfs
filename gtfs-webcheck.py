@@ -562,10 +562,17 @@ class GWCJn:
 
 		trip_order = list()
 		for sig_key in cps['result']:
-			# XXX: not sure what date1/date2 represent here
-			src, dst, date1, train_info = sig_key.split(';')
-			if not train_info: continue
+			# simple: 3087;3147;2017-08-14;P04621|14/08/2017
+			# association: 3087;4892;2017-09-14;C20213|14/09/2017;OXF;C22477|14/09/2017
+			# non-train: 3087;4892;2017-09-14;
+			# Not sure what to do with date1/date2/date3 here.
+			src, dst, date1, train_info = sig_key.split(';', 3)
+			if not train_info: continue # non-train trips, e.g. bus, underground, foot, etc
 			train_uid, date2 = train_info.split('|', 1)
+			if ';' in date2:
+				date2, assoc_stop, train_info = date2.split(';')
+				assoc_uid, date3 = train_info.split('|', 1)
+				train_uid = f'{train_uid}_{assoc_uid}'
 			src, dst = (cps['links'][f'/data/stations/{s}']['crs'] for s in [src, dst])
 			sig_n, jst = jn_sig.trip_index(src, dst)
 			sig = GWCTrip.TripSig(src, dst, train_uid, jst.ts_src)
@@ -760,10 +767,7 @@ class GWCAPISerw:
 		for jp_url in jp_urls:
 			jn_sig = GWCJnSig.from_serw_url(jp_url.rsplit('/', 1)[-1])
 			cps = await self.api_call('get', f'{jp_url}/calling-points')
-			try: journeys.append(GWCJn.from_serw_cps(jn_sig, cps))
-			except Exception as err:
-				raise GWCError( f'Failed to parse journey info:'
-					f' [{err.__class__.__name__}] {err}', err, jn_sig, cps )
+			journeys.append(GWCJn.from_serw_cps(jn_sig, cps))
 		return journeys
 
 
@@ -781,7 +785,8 @@ class GWCAPISerw:
 			for jn in jns:
 				if len(jn.trips) > 1: continue
 				jn_trip = jn.trips[0]
-				if jn_trip.train_uid not in trip.train_uid.split('_'): continue
+				if ( jn_trip.train_uid != trip.train_uid
+					and jn_trip.train_uid not in trip.train_uid.split('_') ): continue
 				if 'nojourney' in fail:
 					jn_trip.train_uid += 'x'
 					continue
