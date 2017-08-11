@@ -297,6 +297,9 @@ class NTCursor(aiomysql.cursors.SSDictCursor):
 
 	def __aiter__(self): return self
 
+	async def close(self): # don't bother with unbuffered results here
+		self._connection = None
+
 	def _conv_row(self, row):
 		if row is None: return
 		return ( self._tt(*row) if self._tt else
@@ -1128,7 +1131,8 @@ async def run_tests(loop, conf):
 		conf.rate_min_seq_delay, conf.rate_max_concurrency )
 	api_list = [GWCAPISerw(loop, conf, api_rate_sem)]
 	async with GWCTestRunner(loop, conf, api_list) as tester:
-		try: await tester.run()
+		task = loop.create_task(tester.run())
+		try: await task
 		except asyncio.CancelledError as err: pass
 		except GWCTestFoundDiffs: exit_code = 174 # LSB Init Script Actions: 150-199
 		else: exit_code = 0
@@ -1274,7 +1278,8 @@ def main(args=None, conf=None):
 
 	log.debug('Starting run_tests loop...')
 	with contextlib.closing(asyncio.get_event_loop()) as loop:
-		exit_code = loop.run_until_complete(run_tests(loop, conf))
+		try: exit_code = loop.run_until_complete(run_tests(loop, conf))
+		except asyncio.CancelledError as err: exit_code = 1
 	log.debug('Finished')
 	return exit_code
 
