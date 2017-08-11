@@ -25,7 +25,10 @@ class TestConfig:
 	# "seq" in all of these is a simple sequential pick.
 	test_pick_trip = dict(seq=1, assoc=0.5, z=0.2)
 	test_pick_date = dict(seq=1, bank_holiday=2, random=2)
-	test_pick_special = None # use named iterator func for special trip/date selection
+	test_pick_date_set = None # only pick dates from the set
+
+	## test_pick_special: use named iterator func for special trip/date selection.
+	test_pick_special = None
 	test_pick_special_iters = {'bank-holidays-only': 'holidays'}
 
 	## test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
@@ -1088,6 +1091,8 @@ class GWCTestRunner:
 				or (date == date_current and time0 > time_current) ), sorted(dates)))
 			dates = dates[:bisect.bisect_left( dates,
 				dt.date.today() + dt.timedelta(self.conf.date_max_future_offset) )]
+			if self.conf.test_pick_date_set:
+				dates = sorted(self.conf.test_pick_date_set.intersection(dates))
 			dates = pick_dates(dates)
 			if not dates:
 				# log_trip.debug('no valid dates to check, skipping')
@@ -1176,7 +1181,10 @@ def main(args=None, conf=None):
 	group.add_argument('-n', '--test-train-limit', type=int, metavar='n',
 		help='Randomly pick specified number of distinct train_uids for testing, ignoring all others.')
 	group.add_argument('-u', '--test-train-uid', metavar='uid-list',
-		help='Test entries for specified train_uid only. Multiple values are split by spaces.')
+		help='Test trips for specified train_uid only. Multiple values are split by spaces.')
+	group.add_argument('--test-date', metavar='date-list',
+		help='Only test specified dates (iso8601 format), skipping'
+			' trips that dont run on them. Multiple values are split by spaces.')
 	group.add_argument('-t', '--test-special',
 		metavar='name', choices=conf.test_pick_special_iters,
 		help='Use special named trip/date selection iterators. Choices: %(choices)s')
@@ -1288,6 +1296,9 @@ def main(args=None, conf=None):
 
 	if opts.test_special:
 		conf.test_pick_special = conf.test_pick_special_iters[opts.test_special]
+	if opts.test_date:
+		conf.test_pick_date_set = set(
+			dt.date(*map(int, d.split('-', 2))) for d in opts.test_date.split() )
 
 	if opts.debug_http_dir: conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
 	if opts.debug_cache_dir: conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
