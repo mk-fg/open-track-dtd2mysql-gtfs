@@ -440,6 +440,7 @@ GWCTestResult = collections.namedtuple('GWCTestResult', 'success exc')
 class GWCTripStop:
 
 	def __init__(self, crs, ts, pickup, dropoff, **meta):
+		pickup, dropoff = ((GTFSEmbarkType.regular if v is True else v) for v in [pickup, dropoff])
 		self.crs, self.ts, self.pickup, self.dropoff, self.meta = crs, ts, pickup, dropoff, meta
 
 	def __repr__(self):
@@ -455,7 +456,8 @@ class GWCTrip:
 	def from_serw_cps(cls, sig, stops, links):
 		embark_flags = dict(
 			Normal=(True, True), Passing=(False, False),
-			PickUpOnly=(True, False), SetDownOnly=(False, True) )
+			PickUpOnly=(True, False), SetDownOnly=(False, True),
+			RequestStop=(False, GTFSEmbarkType.driver) )
 		src, dst, trip_stops, ts0 = sig.src, sig.dst, list(), None
 		for stop in stops:
 			stop_info = links[stop['station']]
