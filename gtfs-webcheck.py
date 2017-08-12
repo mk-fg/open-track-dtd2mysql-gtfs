@@ -424,6 +424,7 @@ class GWCAPIError(GWCError): pass
 class GWCAPIErrorCode(GWCAPIError): pass
 
 class GWCTestFoundDiffs(Exception): pass
+class GWCTestSkip(Exception): pass
 
 class GWCTestBatchFail(Exception):
 	def __init__(self, *exc_list): self.exc_list = exc_list
@@ -742,8 +743,6 @@ class GWCAPISerw:
 				starting at ts_dep UTC/BST datetime (without timezone, default: now) or later.
 			ts_dep can be either datetime or tuple to specify departure date/time range.
 			Default ts_dep range if only one datetime is specified is (ts_dep, ts_dep+3h).'''
-		src = await self.get_station(src, self.st_type.src)
-		dst = await self.get_station(dst, self.st_type.dst)
 
 		# Default is to use current time as ts_start and +3h as ts_end
 		if not ts_dep:
@@ -781,8 +780,15 @@ class GWCAPISerw:
 	async def test_trip(self, trip):
 		fail = self.conf.debug_trigger_mismatch
 		fail = fail.lower().split() if fail else list()
+
+		src, dst = (trip.stops[n].crs for n in [0, -1])
+		try:
+			src = await self.get_station(src, self.st_type.src)
+			dst = await self.get_station(dst, self.st_type.dst)
+		except GWCError as err: # XXX: query from API maybe?
+			raise GWCTestSkip(f'Failed to match src/dst station crs codes: {err}')
+
 		async with self.rate_sem:
-			src, dst = (trip.stops[n].crs for n in [0, -1])
 			jns = await self.get_journeys(src, dst, ts_dep=(trip.ts_start, trip.ts_end))
 
 			## Find one-direct-trip journey with matching train_uid
@@ -1124,7 +1130,12 @@ class GWCTestRunner:
 				except GWCTestBatchFail as err_batch:
 					for err in err_batch.exc_list:
 						err_type = err.__class__.__name__
-						if not isinstance(err, GWCTestFail):
+						if isinstance(err, GWCTestSkip):
+							log_trip.debug('check skipped due to api limitation - {}', err)
+							self.stats['trip-skip-api'] += 1
+							self.trip_log_update(t, '-skip-')
+							continue # not actually a diff
+						elif not isinstance(err, GWCTestFail):
 							try: raise err from None
 							except Exception as err:
 								log_lines(
