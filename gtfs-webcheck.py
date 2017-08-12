@@ -4,8 +4,8 @@ import itertools as it, operator as op, functools as ft
 import datetime as dt
 import os, sys, pathlib, signal, locale, warnings
 import contextlib, inspect, collections, enum, time
-import asyncio, urllib.parse, json, re
-import random, secrets, bisect
+import asyncio, urllib.parse, json, re, base64
+import random, secrets, bisect, hashlib
 import textwrap, pprint, logging, logging.handlers
 
 import aiohttp # http://aiohttp.readthedocs.io
@@ -278,7 +278,9 @@ def random_weight(items, keys_subset=None):
 	return random.choices(keys, weights)[0]
 
 popn = lambda v,n: list(v.pop() for m in range(n))
-url_to_fn = lambda p: p.replace('/', '-').replace('.', '_')
+url_to_fn = lambda p: base64.urlsafe_b64encode(
+	hashlib.blake2s(p.encode(), key=b'gtfs-webcheck.url-to-fn').digest() ).decode()[:8]
+
 json_pretty = dict(sort_keys=True, indent=2, separators=(',', ': '))
 pformat_data = lambda data: pprint.pformat(data, indent=2, width=100)
 
