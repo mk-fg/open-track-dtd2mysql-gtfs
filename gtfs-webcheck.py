@@ -470,8 +470,8 @@ class GWCTrip:
 			if ts:
 				if not ts0: ts0 = dt.datetime(ts.year, ts.month, ts.day)
 				ts -= ts0
-			name, crs, nlc, lat, lon = op.itemgetter(
-				'name', 'crs', 'nlc', 'latitude', 'longitude' )(stop_info)
+			name, crs, nlc = op.itemgetter('name', 'crs', 'nlc')(stop_info)
+			lat, lon = (stop_info.get(k) for k in ['latitude', 'longitude'])
 			if src and src != crs: continue
 			src = trip_stops.append(GWCTripStop(
 				crs, ts, pickup, dropoff, name=name, nlc=nlc, lat=lat, lon=lon ))
