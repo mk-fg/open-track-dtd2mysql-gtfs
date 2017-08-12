@@ -487,11 +487,12 @@ class GWCTrip:
 	def __init__(self, train_uid, stops, ts_start=None, ts_end=None):
 		self.train_uid, self.stops = train_uid, stops
 		if stops and (ts_start or ts_end):
+			stops_ts = list(filter(op.attrgetter('ts'), stops))
 			if not ts_start:
-				ts_start = dts_to_dt(stops[0].ts, ts_end.date())
+				ts_start = dts_to_dt(stops_ts[0].ts, ts_end.date())
 				while ts_start >= ts_end: ts_start -= dt.timedelta(days=1)
 			if not ts_end:
-				ts_end = dts_to_dt(stops[-1].ts, ts_start.date())
+				ts_end = dts_to_dt(stops_ts[-1].ts, ts_start.date())
 				while ts_end <= ts_start: ts_end += dt.timedelta(days=1)
 		self.ts_start, self.ts_end = ts_start, ts_end
 
