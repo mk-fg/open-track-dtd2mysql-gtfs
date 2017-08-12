@@ -280,6 +280,7 @@ def random_weight(items, keys_subset=None):
 popn = lambda v,n: list(v.pop() for m in range(n))
 url_to_fn = lambda p: base64.urlsafe_b64encode(
 	hashlib.blake2s(p.encode(), key=b'gtfs-webcheck.url-to-fn').digest() ).decode()[:8]
+err_cls = lambda err: err.__class__.__name__
 
 json_pretty = dict(sort_keys=True, indent=2, separators=(',', ': '))
 pformat_data = lambda data: pprint.pformat(data, indent=2, width=100)
@@ -650,8 +651,7 @@ class GWCAPISerw:
 					raise subprocess.SubprocessError(f'exit_code={res.returncode}')
 			except subprocess.SubprocessError as err:
 				log_lines( self.log.error, [
-					('Failed to get diff output for trips: [{}] {}',
-						err.__class__.__name__, err ),
+					('Failed to get diff output for trips: [{}] {}', err_cls(err), err),
 					('cmd: {}', cmd), ('  trip-gtfs: {}', gtfs_trip), ('  trip-api: {}', jn_trip) ])
 				return
 			return f'Matching journey trip [{dst2.name}]:\n  {jn_trip}\n{res.stdout.decode()}'
@@ -716,7 +716,7 @@ class GWCAPISerw:
 				self._api_error_check(res.status, data)
 
 		except aiohttp.ClientError as err:
-			raise GWCAPIError(None, f'[{err.__class__.__name__}] {err}') from None
+			raise GWCAPIError(None, f'[{err_cls(err)}] {err}') from None
 
 		if self.conf.debug_cache_dir:
 			self.log.debug('serw-api cache-write: {}', cache_fn)
@@ -787,45 +787,45 @@ class GWCAPISerw:
 			src = await self.get_station(src, self.st_type.src)
 			dst = await self.get_station(dst, self.st_type.dst)
 		except GWCError as err: # XXX: query from API maybe?
-			raise GWCTestSkip(f'Failed to match src/dst station crs codes: {err}')
+			raise GWCTestSkip(f'[{err_cls(err)}] {err}')
 
 		async with self.rate_sem:
 			jns = await self.get_journeys(src, dst, ts_dep=(trip.ts_start, trip.ts_end))
 
-			## Find one-direct-trip journey with matching train_uid
-			for jn in jns:
-				if len(jn.trips) > 1: continue
-				jn_trip = jn.trips[0]
-				if ( jn_trip.train_uid != trip.train_uid
-					and jn_trip.train_uid not in trip.train_uid.split('_') ): continue
-				if 'nojourney' in fail:
-					jn_trip.train_uid += 'x'
-					continue
-				break
-			else: raise GWCTestFailNoJourney(self.api_tag, trip, jns)
+		## Find one-direct-trip journey with matching train_uid
+		for jn in jns:
+			if len(jn.trips) > 1: continue
+			jn_trip = jn.trips[0]
+			if ( jn_trip.train_uid != trip.train_uid
+				and jn_trip.train_uid not in trip.train_uid.split('_') ): continue
+			if 'nojourney' in fail:
+				jn_trip.train_uid += 'x'
+				continue
+			break
+		else: raise GWCTestFailNoJourney(self.api_tag, trip, jns)
 
-			## Match all stops/stop-times
-			# SERW API returns non-public stops (often duplicated), which are missing in gtfs
-			jn_stops_iter, mismatch_n = iter(jn_trip.stops), random.randrange(0, len(trip.stops))
-			for n, st1 in enumerate(trip.stops):
-				if n == mismatch_n and 'stopnotfound' in fail: st1.crs += 'x'
-				for st2 in jn_stops_iter:
-					if not st2.ts: continue # possible non-public duplicate before public one
-					if st1.crs == st2.crs: break
-					if st2.ts:
-						raise GWCTestFailStopNotFound(
-							self.api_tag, trip, [jn_trip, st2], diff=self.format_trip_diff(trip, jn_trip) )
-				else:
+		## Match all stops/stop-times
+		# SERW API returns non-public stops (often duplicated), which are missing in gtfs
+		jn_stops_iter, mismatch_n = iter(jn_trip.stops), random.randrange(0, len(trip.stops))
+		for n, st1 in enumerate(trip.stops):
+			if n == mismatch_n and 'stopnotfound' in fail: st1.crs += 'x'
+			for st2 in jn_stops_iter:
+				if not st2.ts: continue # possible non-public duplicate before public one
+				if st1.crs == st2.crs: break
+				if st2.ts:
 					raise GWCTestFailStopNotFound(
-						self.api_tag, trip, [jn_trip, st1], diff=self.format_trip_diff(trip, jn_trip) )
-				if n == mismatch_n and 'stopmismatch' in fail:
-					st1.ts = st2.ts + dt.timedelta(seconds=self.conf.test_trip_time_slack + 5*60)
-				ts1, ts2 = ((0 if not st.ts else st.ts.total_seconds()) for st in [st1, st2])
-				ts_diff = abs(ts1 - ts2)
-				if ts_diff > self.conf.test_trip_time_slack:
-					raise GWCTestFailStopMismatch( self.api_tag, trip,
-						diff=self.format_trip_diff(trip, jn_trip),
-						data=[jn_trip, st1.crs, (st1.ts, st2.ts), (ts_diff, self.conf.test_trip_time_slack)] )
+						self.api_tag, trip, [jn_trip, st2], diff=self.format_trip_diff(trip, jn_trip) )
+			else:
+				raise GWCTestFailStopNotFound(
+					self.api_tag, trip, [jn_trip, st1], diff=self.format_trip_diff(trip, jn_trip) )
+			if n == mismatch_n and 'stopmismatch' in fail:
+				st1.ts = st2.ts + dt.timedelta(seconds=self.conf.test_trip_time_slack + 5*60)
+			ts1, ts2 = ((0 if not st.ts else st.ts.total_seconds()) for st in [st1, st2])
+			ts_diff = abs(ts1 - ts2)
+			if ts_diff > self.conf.test_trip_time_slack:
+				raise GWCTestFailStopMismatch( self.api_tag, trip,
+					diff=self.format_trip_diff(trip, jn_trip),
+					data=[jn_trip, st1.crs, (st1.ts, st2.ts), (ts_diff, self.conf.test_trip_time_slack)] )
 
 
 class GWCTestRunner:
@@ -1130,7 +1130,7 @@ class GWCTestRunner:
 				try: await self.check_trip(trip, ts_start=ts_src)
 				except GWCTestBatchFail as err_batch:
 					for err in err_batch.exc_list:
-						err_type = err.__class__.__name__
+						err_type = err_cls(err)
 						if isinstance(err, GWCTestSkip):
 							log_trip.debug('check skipped due to api limitation - {}', err)
 							self.stats['trip-skip-api'] += 1
