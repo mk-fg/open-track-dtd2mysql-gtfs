@@ -299,6 +299,7 @@ class GTFSDB:
 
 		self.commit()
 
+
 	def diff_check_skip_rollovers(self, diff):
 		stop_sets = tuple(tuple(
 			( tuple((crs, ts_arr[2:], ts_dep[2:]) for crs,ts_arr,ts_dep in stops)
@@ -399,8 +400,6 @@ class GTFSDB:
 					if trip.svc_id in trip_span_idx[trip_hash]: stats[db]['trip-dup'] += 1 # same stops/svc
 					trip_span_idx[trip_hash].add(trip.svc_id)
 					trip_stops_idx[trip_hash] = trip_stops
-			train_uid_tuple = ','.join(map(self.escape, train_uid.split('_')))
-
 
 			log.debug('Comparing trip stops for train_uid={}...', train_uid)
 			stop_sets = tuple(set(trip_info[db].stops.values()) for db in dbs)
@@ -436,41 +435,7 @@ class GTFSDB:
 						print(diff_print_fill(
 							stop_seq_str(seq),
 							' {} - '.format('x' if seq in diff_seqs else ' '), '     ' ))
-				if cif_db:
-					print('cif schedules/stops (for reference):')
-					for s in self.q(f'''
-							SELECT
-								s.train_uid, s.id, stp_indicator AS stp,
-								runs_from AS a , runs_to AS b, bank_holiday_running AS always,
-								CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
-								crs_code, public_arrival_time AS ts_arr, public_departure_time AS ts_dep
-							FROM {cif_db}.schedule s
-							LEFT JOIN {cif_db}.stop_time st ON st.schedule = s.id
-							LEFT JOIN {cif_db}.tiploc t ON t.tiploc_code = st.location
-							WHERE
-								train_uid IN ({train_uid_tuple})
-								AND (st.id IS NULL OR t.crs_code IS NOT NULL)
-							ORDER BY s.train_uid, FIELD(stp_indicator,'P','O','N','C'), s.id, st.id'''):
-						days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
-						print(
-							f'  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
-							'A' if s.always else ' ', s.crs_code or '---',
-							dts_format(s.ts_arr), dts_format(s.ts_dep) )
-					print('cif associations (for reference):')
-					for a in self.q(f'''
-							SELECT
-								a.id, base_uid, assoc_uid, start_date AS a, end_date AS b,
-								stp_indicator as stp, crs_code, assoc_cat, assoc_date_ind,
-								CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
-							FROM {cif_db}.association a
-							JOIN {cif_db}.tiploc tl ON a.assoc_location = tl.tiploc_code
-							WHERE a.base_uid IN ({train_uid_tuple}) OR a.assoc_uid IN ({train_uid_tuple})
-							ORDER BY a.base_uid, a.assoc_uid, FIELD(a.stp_indicator,'P','O','N','C'), a.id'''):
-						days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
-						print(
-							( f'  {a.base_uid} {a.assoc_uid} {a.id:>7d}'
-								f' {a.stp} {a.assoc_cat or "--"} {{}} {a.crs_code} {a.a} {a.b} {days}' )\
-							.format('N' if a.assoc_date_ind == 'N' else '-') )
+				if cif_db: self.print_info(train_uid, cif_db, cif_comment=' (for reference)')
 
 			log.debug('Comparing trip calendars for train_uid={}...', train_uid)
 			th1, th2 = (set(trip_info[db].spans.keys()) for db in dbs)
@@ -486,7 +451,7 @@ class GTFSDB:
 						FROM {db}.calendar c
 						LEFT JOIN {db}.calendar_dates cd USING(service_id)
 						WHERE service_id IN ({svc_ids})
-						ORDER BY service_id''' )
+						ORDER BY service_id''')
 					svc_days, svc_spans = set(), list()
 					for svc_id, days in it.groupby(calendars, op.attrgetter('id')):
 						svc = next(days)
@@ -530,38 +495,115 @@ class GTFSDB:
 							('{} [{}]'.format(day, day.weekday()+1) if day in days else '')
 							for days in [days1, days2] )))
 					if cif_db:
-						print('  cif schedules (for reference):')
-						for s in self.q(f'''
-								SELECT
-									train_uid, id, stp_indicator AS stp,
-									runs_from AS a , runs_to AS b, bank_holiday_running AS always,
-									CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
-								FROM {cif_db}.schedule
-								WHERE train_uid IN ({train_uid_tuple})
-								ORDER BY train_uid, FIELD(stp_indicator,'P','N','O','C'), id'''):
-							days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
-							print(
-								f'    {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
-								'no-holidays' if s.always else '' )
-						print('  cif associations (for reference):')
-						for a in self.q(f'''
-								SELECT
-									a.id, base_uid, assoc_uid, start_date AS a, end_date AS b,
-									stp_indicator as stp, crs_code, assoc_cat, assoc_date_ind,
-									CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
-								FROM {cif_db}.association a
-								JOIN {cif_db}.tiploc tl ON a.assoc_location = tl.tiploc_code
-								WHERE a.base_uid IN ({train_uid_tuple}) OR a.assoc_uid IN ({train_uid_tuple})
-								ORDER BY a.base_uid, a.assoc_uid, FIELD(a.stp_indicator,'P','O','N','C'), a.id'''):
-							days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, a.days)))
-							print(
-								( f'    {a.base_uid} {a.assoc_uid} {a.id:>7d}'
-									f' {a.stp} {a.assoc_cat or "--"} {{}} {a.crs_code} {a.a} {a.b} {days}' )\
-								.format('N' if a.assoc_date_ind == 'N' else '-') )
+						self.print_info( train_uid, cif_db,
+							prefix=2, cif_stops=False, cif_comment=' (for reference)' )
 
 			for db in dbs:
 				for k, v in stats[db].items(): log.info('[{}] Quirk count: {}={}', db, k, v)
 			if diff_found and stop_after_train_uid_mismatch: break
+
+
+	def print_info( self,
+			train_uid, db_cif=None, db_gtfs=None,
+			prefix=None, cif_stops=True, cif_comment='' ):
+		train_assoc = train_uid.split('_')
+		train_assoc, train_uid_tuple = len(train_assoc) > 1, ','.join(map(self.escape, train_assoc))
+		pre = prefix or 0
+		if isinstance(pre, int): pre *= ' '
+
+		if db_cif:
+			sched_query = f'''
+				SELECT
+					s.train_uid, s.id, stp_indicator AS stp,
+					runs_from AS a , runs_to AS b, bank_holiday_running AS always,
+					CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
+					-- , crs_code, public_arrival_time AS ts_arr, public_departure_time AS ts_dep
+				FROM {db_cif}.schedule s
+				-- LEFT JOIN {db_cif}.stop_time st ON st.schedule = s.id
+				-- LEFT JOIN {db_cif}.tiploc t ON t.tiploc_code = st.location
+				WHERE
+					train_uid IN ({train_uid_tuple})
+					-- AND (st.id IS NULL OR t.crs_code IS NOT NULL)
+				ORDER BY
+					s.train_uid, -- FIELD(stp_indicator,'P','O','N','C'),
+					s.id -- , st.id'''
+			sched_query = re.sub( r'[\t ]*-- (.*(\n|$))',
+				r'\1' if cif_stops else '', sched_query )
+			sched_query = re.sub('(?<=\S)\t+(?=\S)', ' ', sched_query).replace('\t', '  ')
+			print(f'{pre}cif schedules{"/stops" if cif_stops else ""}{cif_comment}:')
+			for s in self.q(sched_query):
+				days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
+				if cif_stops:
+					print(
+						f'{pre}  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
+						'A' if s.always else ' ', s.crs_code or '---',
+						dts_format(s.ts_arr), dts_format(s.ts_dep) )
+				else:
+					print(
+						f'{pre}  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
+						'no-holidays' if s.always else '' )
+
+			assocs = list(self.q(f'''
+				SELECT
+					a.id, base_uid, assoc_uid, start_date AS a, end_date AS b,
+					stp_indicator as stp, crs_code, assoc_cat, assoc_date_ind,
+					CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
+				FROM {db_cif}.association a
+				JOIN {db_cif}.tiploc tl ON a.assoc_location = tl.tiploc_code
+				WHERE a.base_uid IN ({train_uid_tuple}) OR a.assoc_uid IN ({train_uid_tuple})
+				ORDER BY a.base_uid, a.assoc_uid, FIELD(a.stp_indicator,'P','O','N','C'), a.id'''))
+			if assocs or train_assoc:
+				print(f'{pre}cif associations{cif_comment}:')
+				for a in assocs:
+					days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
+					print(
+						( f'{pre}  {a.base_uid} {a.assoc_uid} {a.id:>7d}'
+							f' {a.stp} {a.assoc_cat or "--"} {{}} {a.crs_code} {a.a} {a.b} {days}' )\
+						.format('N' if a.assoc_date_ind == 'N' else '-') )
+
+		if db_gtfs:
+			print(f'{pre}gtfs trips:')
+			db_trips = list(self.q(f'''
+				SELECT
+					t.trip_id,
+					t.service_id AS svc_id,
+					st.stop_id AS id,
+					st.stop_sequence AS seq,
+					st.arrival_time AS ts_arr,
+					st.departure_time AS ts_dep
+				FROM {db_gtfs}.trips t
+				LEFT JOIN {db_gtfs}.stop_times st USING(trip_id)
+				WHERE t.trip_headsign = %s
+				ORDER BY t.trip_id, st.stop_sequence''', train_uid))
+			for trip_id, stops in it.groupby(db_trips, op.attrgetter('trip_id')):
+				trip, trip_stops = next(stops), list()
+				if trip.id is not None:
+					for st in [trip, *stops]:
+						if st.ts_arr: ts_arr = dts_format(st.ts_arr or st.ts_dep)
+						if st.ts_dep: ts_dep = dts_format(st.ts_dep or st.ts_arr)
+						trip_stops.append((st.id, ts_arr, ts_dep))
+				calendars = self.q(f'''
+					SELECT
+						service_id AS id, start_date AS a, end_date AS b,
+						CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days,
+						date, exception_type AS exc
+					FROM {db_gtfs}.calendar c
+					LEFT JOIN {db_gtfs}.calendar_dates cd USING(service_id)
+					WHERE service_id = %s''', trip.svc_id)
+				svc_days = set()
+				for svc_id, days in it.groupby(calendars, op.attrgetter('id')):
+					svc = next(days)
+					days = list() if svc.date is None else [svc, *days]
+					exc_days = set(row.date for row in days if row.exc == 2)
+					extra_days = set(row.date for row in days if row.exc == 1)
+					span = GTFSTimespan(svc.a, svc.b, tuple(map(int, svc.days)), exc_days)
+					svc_days.update(it.chain(span.date_iter(), extra_days))
+				print(f'{pre}  [{trip_id}] svc={trip.svc_id} svc_days={len(svc_days)}:')
+				print(f'{pre}    {span}')
+				if extra_days: print(f'{pre}    extra days:', ',  '.join(map(str, extra_days)))
+				print(f'{pre}    stop sequence:')
+				for stop_id, ts_arr, ts_dep in trip_stops:
+					print(f'{pre}      {stop_id} {ts_arr or "-":^3s} {ts_dep or "-":^3s}')
 
 
 def main(args=None):
@@ -626,6 +668,14 @@ def main(args=None):
 		metavar='strptime-format', default='%d-%b-%Y',
 		help='strptime() format for each line in --skip-bank-holiday-diffs file. Default: %(default)s')
 
+
+	cmd = cmds.add_parser('query',
+		help='Show info from gtfs/cif databases for specific train_uid.')
+	cmd.add_argument('db_cif', help='CIF database name.')
+	cmd.add_argument('db_gtfs', help='GTFS database name.')
+	cmd.add_argument('train_uid', help='Single train_uid to query/show information for.')
+
+
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
 	# Force line buffering for stdout, instead of default chunks when it's not tty
@@ -654,6 +704,9 @@ def main(args=None):
 				opts.db1, opts.db2, cif_db=opts.cif_db, train_uid_limit=opts.train_uid_limit,
 				train_uid_seek=opts.train_uid_seek, train_uid_next=opts.train_uid_seek_next,
 				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch, skip_diffs=skip )
+
+		if opts.call == 'query':
+			db.print_info(opts.train_uid, opts.db_cif, opts.db_gtfs)
 
 		else: parser.error(f'Action not implemented: {opts.call}')
 
