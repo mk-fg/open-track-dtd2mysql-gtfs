@@ -809,6 +809,7 @@ class GWCAPISerw:
 			try:
 				src_nlc = await self.get_station(src, self.st_type.src)
 				dst_nlc = await self.get_station(dst, self.st_type.dst)
+				if src_nlc == dst_nlc: raise GWCError
 			except GWCError as err: jns = None
 			else: jns = await self.get_journeys(src_nlc, dst_nlc, ts_dep=(trip.ts_start, trip.ts_end))
 
@@ -826,6 +827,7 @@ class GWCAPISerw:
 						try: nlc = await self.get_station(crs, self.st_type[k], check=True)
 						except GWCError as err: continue
 						ends[k] = crs, nlc
+						if ends['src'] == ends['dst']: break
 					else: continue
 					raise GWCTestSkipTrip(self.api_tag, 'trip has no api-valid stops')
 				(src, src_nlc), (dst, dst_nlc) = ends['src'], ends['dst']
