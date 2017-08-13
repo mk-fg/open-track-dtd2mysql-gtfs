@@ -5,7 +5,6 @@ import os, sys, contextlib, logging, pathlib, re, warnings, locale
 import collections, time, csv, datetime, pprint, textwrap, random
 
 import pymysql, pymysql.cursors # https://pymysql.readthedocs.io/
-import deepdiff # http://deepdiff.readthedocs.io/
 
 
 class LogMessage(object):
@@ -374,6 +373,7 @@ class GTFSDB:
 
 	def compare( self, db1, db2, cif_db=None, skip_diffs=None, train_uid_limit=None,
 			train_uid_seek=None, train_uid_next=False, stop_after_train_uid_mismatch=False ):
+		import deepdiff # http://deepdiff.readthedocs.io/
 		log, dbs = self.log, (db1, db2)
 
 		diff_func = ft.partial(deepdiff.DeepDiff, view='tree')
@@ -591,7 +591,7 @@ class GTFSDB:
 								else: sched_info.append(f'{train_uid}.{sched_id}')
 							sched_info = f' ({", ".join(sched_info)})'
 						else: sched_info = ''
-						print(f'  {k}: {v}{sched_info}')
+						print(f'{pre}  {k}: {v}{sched_info}')
 
 			print(f'{pre}cif schedules{"/stops" if cif_stops else ""}{cif_comment}:')
 			sched_query = f'''
@@ -744,7 +744,7 @@ def main(args=None):
 		help='Name of CIF database to pull/display reference data from on mismatches.')
 
 	group = cmd.add_argument_group('Subset selection')
-	group.add_argument('-s', '--train-uid-seek', metavar='train_uid',
+	group.add_argument('-u', '--train-uid-seek', metavar='train_uid',
 		help='Skip to diff of specified train_uid (ignoring all diffs before it).')
 	group.add_argument('-x', '--train-uid-seek-next', action='store_true',
 		help='When using -s/--train-uid-seek, skip to diff for train_uid right after specified one.')
@@ -807,7 +807,7 @@ def main(args=None):
 				train_uid_seek=opts.train_uid_seek, train_uid_next=opts.train_uid_seek_next,
 				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch, skip_diffs=skip )
 
-		if opts.call == 'query':
+		elif opts.call == 'query':
 			if opts.train_uid:
 				if not (opts.db_cif or opts.db_gtfs):
 					parser.error('Either --db-cif or --db-gtfs must be specified for --train-uid info.')
