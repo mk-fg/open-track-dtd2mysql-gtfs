@@ -61,9 +61,9 @@ class TestConfig:
 			'otrl|a6af56be1691ac2929898c9f68c4b49a0a2d930849770dba976be5d792a',
 		'User-Agent': 'gtfs-webcheck/1.0 (+https://github.com/mk-fg/open-track-dtd2mysql-gtfs/)',
 	}
-	serw_error_skip = {
+	serw_error_skip = { # tuple of (failureType, errorCode), latter can be regexp
 		# Skip any IPTIS-related warnings - should only be relevant for fares afaict
-		('Warning', 'IptisNrsError'), ('Warning', 'IptisNoRealTimeDataAvailable') }
+		('Warning', re.compile(r'^Iptis[A-Z]')) }
 	serw_api_debug = False
 
 	rate_interval = 1 # seconds
@@ -284,6 +284,7 @@ err_cls = lambda err: err.__class__.__name__
 
 json_pretty = dict(sort_keys=True, indent=2, separators=(',', ': '))
 pformat_data = lambda data: pprint.pformat(data, indent=2, width=100)
+re_type = type(re.compile(''))
 
 def die(): raise RuntimeError
 
@@ -673,7 +674,12 @@ class GWCAPISerw:
 				err = err.get('failureType'), err['errorCode']
 			except: raise GWCAPIError(http_status, err)
 			if err not in self.conf.serw_error_skip:
-				raise GWCAPIErrorCode(http_status, *err)
+				err_type, err_code = err
+				for chk_type, chk_code in self.conf.serw_error_skip or list():
+					if chk_type != err_type: continue
+					if chk_code == err_code: break
+					if isinstance(chk_code, re_type) and chk_code.search(err_code): break
+				else: raise GWCAPIErrorCode(http_status, *err)
 		elif isinstance(data, dict) and 'result' not in data:
 			raise GWCAPIError(http_status, f'no "result" key in data - {data!r}')
 		if http_status != 200:
