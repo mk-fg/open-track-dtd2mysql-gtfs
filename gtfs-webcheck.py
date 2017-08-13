@@ -1269,10 +1269,10 @@ def main(args=None, conf=None):
 		help='Randomly pick specified number of distinct train_uids for testing, ignoring all others.')
 	group.add_argument('-u', '--test-train-uid', metavar='uid-list',
 		help='Test trips for specified train_uid only. Multiple values are split by spaces.')
-	group.add_argument('--test-date', metavar='date-list',
+	group.add_argument('-t', '--test-date', metavar='date-list',
 		help='Only test specified dates (iso8601 format), skipping'
 			' trips that dont run on them. Multiple values are split by spaces.')
-	group.add_argument('-t', '--test-special',
+	group.add_argument('--test-special',
 		metavar='name', choices=conf.test_pick_special_iters,
 		help='Use special named trip/date selection iterators. Choices: %(choices)s')
 
