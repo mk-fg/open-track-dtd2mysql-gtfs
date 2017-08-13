@@ -123,7 +123,7 @@ Usage examples
 
 - Manually check cif/gtfs data for specific train_uid (to check on any mismatches)::
 
-    % ./gtfs-compare.py query cif gtfs_py P04358
+    % ./gtfs-compare.py query -c cif -d gtfs_py -u P04358
 
     cif schedules/stops:
       P04358  216245 P 2017-08-28 2017-08-28 1...... A PAD --:-- 02:13

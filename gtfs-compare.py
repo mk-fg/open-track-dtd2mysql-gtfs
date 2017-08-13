@@ -435,7 +435,7 @@ class GTFSDB:
 						print(diff_print_fill(
 							stop_seq_str(seq),
 							' {} - '.format('x' if seq in diff_seqs else ' '), '     ' ))
-				if cif_db: self.print_info(train_uid, cif_db, cif_comment=' (for reference)')
+				if cif_db: self.print_train_info(train_uid, cif_db, cif_comment=' (for reference)')
 
 			log.debug('Comparing trip calendars for train_uid={}...', train_uid)
 			th1, th2 = (set(trip_info[db].spans.keys()) for db in dbs)
@@ -495,7 +495,7 @@ class GTFSDB:
 							('{} [{}]'.format(day, day.weekday()+1) if day in days else '')
 							for days in [days1, days2] )))
 					if cif_db:
-						self.print_info( train_uid, cif_db,
+						self.print_train_info( train_uid, cif_db,
 							prefix=2, cif_stops=False, cif_comment=' (for reference)' )
 
 			for db in dbs:
@@ -503,7 +503,7 @@ class GTFSDB:
 			if diff_found and stop_after_train_uid_mismatch: break
 
 
-	def print_info( self,
+	def print_train_info( self,
 			train_uid, db_cif=None, db_gtfs=None,
 			prefix=None, cif_stops=True, cif_comment='' ):
 		train_assoc = train_uid.split('_')
@@ -606,6 +606,22 @@ class GTFSDB:
 					print(f'{pre}      {stop_id} {ts_arr or "-":^3s} {ts_dep or "-":^3s}')
 
 
+	def print_stop_info(self, crs, db_cif):
+		print(f'Station: {crs}')
+		seen = dict()
+		for s in self.q(f'''
+				SELECT *
+				FROM {db_cif}.physical_station s
+				LEFT JOIN {db_cif}.tiploc tl USING(tiploc_code)
+				LEFT JOIN {db_cif}.alias a USING(station_name)
+				WHERE s.crs_code = %s''', crs):
+			for k, v in s._asdict().items():
+				if k == 'id' or k.startswith('_'): continue
+				if seen.get(k, ...) == v: continue
+				seen[k] = v
+				print(f'  {k}: {v}')
+
+
 def main(args=None):
 	import argparse
 	parser = argparse.ArgumentParser(
@@ -671,9 +687,12 @@ def main(args=None):
 
 	cmd = cmds.add_parser('query',
 		help='Show info from gtfs/cif databases for specific train_uid.')
-	cmd.add_argument('db_cif', help='CIF database name.')
-	cmd.add_argument('db_gtfs', help='GTFS database name.')
-	cmd.add_argument('train_uid', help='Single train_uid to query/show information for.')
+	cmd.add_argument('-c', '--db-cif', metavar='db-name', help='CIF database name.')
+	cmd.add_argument('-d', '--db-gtfs', metavar='db-name', help='GTFS database name.')
+	cmd.add_argument('-u', '--train-uid', metavar='uid',
+		help='Single train_uid to query/show information for.')
+	cmd.add_argument('-s', '--stop-crs', metavar='crs-code',
+		help='Show info for specified 3-letter stop CRS code from CIF data.')
 
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -706,7 +725,12 @@ def main(args=None):
 				stop_after_train_uid_mismatch=opts.stop_after_train_uid_mismatch, skip_diffs=skip )
 
 		if opts.call == 'query':
-			db.print_info(opts.train_uid, opts.db_cif, opts.db_gtfs)
+			if opts.train_uid:
+				if not (opts.db_cif or opts.db_gtfs):
+					parser.error('Either --db-cif or --db-gtfs must be specified for --train-uid info.')
+				db.print_train_info(opts.train_uid, opts.db_cif, opts.db_gtfs)
+			if opts.stop_crs:
+				db.print_stop_info(opts.stop_crs, opts.db_cif)
 
 		else: parser.error(f'Action not implemented: {opts.call}')
 
