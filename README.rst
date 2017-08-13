@@ -121,7 +121,7 @@ Usage examples
   well as other configuration params, most of which are only available in
   TestConfig at the top of the script itself at the moment.
 
-- Manually check cif/gtfs data for specific train_uid (to check on any mismatches)::
+- Manually query cif/gtfs data (to check for any mismatches)::
 
     % ./gtfs-compare.py query -c cif -d gtfs_py -u P04358
 
@@ -135,6 +135,8 @@ Usage examples
           PAD 02:13 02:13
           XTH 03:38 03:38
 
+  Aside from ``-u/--train-uid``, there are also ``-t/--trip-id`` (GTFS trip) and
+  ``-s/--stop-crs`` (all CIF info for stop/station) queries.
 
 Links
 -----

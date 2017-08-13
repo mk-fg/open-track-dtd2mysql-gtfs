@@ -504,14 +504,15 @@ class GTFSDB:
 
 
 	def print_train_info( self,
-			train_uid, db_cif=None, db_gtfs=None,
-			prefix=None, cif_stops=True, cif_comment='' ):
-		train_assoc = train_uid.split('_')
-		train_assoc, train_uid_tuple = len(train_assoc) > 1, ','.join(map(self.escape, train_assoc))
+			train_uid=None, db_cif=None, db_gtfs=None,
+			trip_id=None, prefix=None, cif_stops=True, cif_comment='' ):
+		assert not (train_uid and trip_id), [train_uid, trip_id]
 		pre = prefix or 0
 		if isinstance(pre, int): pre *= ' '
 
-		if db_cif:
+		if db_cif and train_uid:
+			train_assoc = train_uid.split('_')
+			train_assoc, train_uid_tuple = len(train_assoc) > 1, ','.join(map(self.escape, train_assoc))
 			sched_query = f'''
 				SELECT
 					s.train_uid, s.id, stp_indicator AS stp,
@@ -542,7 +543,6 @@ class GTFSDB:
 					print(
 						f'{pre}  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
 						'no-holidays' if s.always else '' )
-
 			assocs = list(self.q(f'''
 				SELECT
 					a.id, base_uid, assoc_uid, start_date AS a, end_date AS b,
@@ -573,8 +573,8 @@ class GTFSDB:
 					st.departure_time AS ts_dep
 				FROM {db_gtfs}.trips t
 				LEFT JOIN {db_gtfs}.stop_times st USING(trip_id)
-				WHERE t.trip_headsign = %s
-				ORDER BY t.trip_id, st.stop_sequence''', train_uid))
+				WHERE {"t.trip_headsign = %s" if train_uid else "t.trip_id = %s"}
+				ORDER BY t.trip_id, st.stop_sequence''', train_uid or trip_id))
 			for trip_id, stops in it.groupby(db_trips, op.attrgetter('trip_id')):
 				trip, trip_stops = next(stops), list()
 				if trip.id is not None:
@@ -686,11 +686,13 @@ def main(args=None):
 
 
 	cmd = cmds.add_parser('query',
-		help='Show info from gtfs/cif databases for specific train_uid.')
+		help='Show info from gtfs/cif databases for specific train/trip/stop.')
 	cmd.add_argument('-c', '--db-cif', metavar='db-name', help='CIF database name.')
 	cmd.add_argument('-d', '--db-gtfs', metavar='db-name', help='GTFS database name.')
 	cmd.add_argument('-u', '--train-uid', metavar='uid',
 		help='Single train_uid to query/show information for.')
+	cmd.add_argument('-t', '--trip-id', metavar='id',
+		help='GTFS trip_id value to print info for.')
 	cmd.add_argument('-s', '--stop-crs', metavar='crs-code',
 		help='Show info for specified 3-letter stop CRS code from CIF data.')
 
@@ -729,6 +731,10 @@ def main(args=None):
 				if not (opts.db_cif or opts.db_gtfs):
 					parser.error('Either --db-cif or --db-gtfs must be specified for --train-uid info.')
 				db.print_train_info(opts.train_uid, opts.db_cif, opts.db_gtfs)
+			if opts.trip_id:
+				if not opts.db_gtfs:
+					parser.error('--db-gtfs must be specified for --trip-id info.')
+				db.print_train_info(trip_id=opts.trip_id, db_gtfs=opts.db_gtfs)
 			if opts.stop_crs:
 				db.print_stop_info(opts.stop_crs, opts.db_cif)
 
