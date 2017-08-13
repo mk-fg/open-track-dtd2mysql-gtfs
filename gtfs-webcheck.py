@@ -578,14 +578,16 @@ class GWCJn:
 			# simple: 3087;3147;2017-08-14;P04621|14/08/2017
 			# association: 3087;4892;2017-09-14;C20213|14/09/2017;OXF;C22477|14/09/2017
 			# non-train: 3087;4892;2017-09-14;
-			# Not sure what to do with date1/date2/date3 here.
+			# Not sure what to do with date1/date2/... here.
 			src, dst, date1, train_info = sig_key.split(';', 3)
 			if not train_info: continue # non-train trips, e.g. bus, underground, foot, etc
 			train_uid, date2 = train_info.split('|', 1)
-			if ';' in date2:
-				date2, assoc_stop, train_info = date2.split(';')
-				assoc_uid, date3 = train_info.split('|', 1)
+			while ';' in date2:
+				date2, assoc_stop, train_info = date2.split(';', 2)
+				assoc_uid, date2 = train_info.split('|', 1)
 				train_uid = f'{train_uid}_{assoc_uid}'
+			if '_' in train_uid: # cut down to "first-uid_last-uid" for complex assocs
+				train_uid = '{}_{}'.format(train_uid.split('_', 1)[0], train_uid.rsplit('_', 1)[-1])
 			src, dst = (cps['links'][f'/data/stations/{s}']['crs'] for s in [src, dst])
 			sig_n, jst = jn_sig.trip_index(src, dst)
 			sig = GWCTrip.TripSig(src, dst, train_uid, jst.ts_src)
