@@ -169,6 +169,49 @@ def stop_seq_str(seq):
 			f'{dts_arr}/{dts_dep}' if dts_arr != dts_dep else dts_arr )
 		for stop, dts_arr, dts_dep in seq )
 
+cif_train_status = {
+	'B': 'bus', 'F': 'freight', 'P': 'passenger/parcels', 'S': 'ship', 'T': 'trip',
+	'1': 'stp-passenger/parcels', '2': 'stp-freight',
+		'3': 'stp-trip', '4':' stp-ship', '5': 'stp-bus' }
+cif_train_category = {
+	'OL': 'London Underground/Metro Service', 'OU': 'Unadvertised Ordinary Passenger',
+	'OO': 'Ordinary Passenger', 'OS': 'Staff Train', 'OW': 'Mixed', 'XC': 'Channel Tunnel',
+	'XD': 'Sleeper (Europe Night Services)', 'XI': 'International', 'XR': 'Motorail',
+	'XU': 'Unadvertised Express', 'XX': 'Express Passenger', 'XZ': 'Sleeper (Domestic)',
+	'BR': 'Bus – Replacement due to engineering work', 'BS': 'Bus – WTT Service', 'SS': 'Ship',
+	'EE': 'Empty Coaching Stock (ECS)', 'EL': 'ECS, London Underground/Metro Service',
+	'ES': 'ECS & Staff', 'JJ': 'Postal', 'PM': 'Post Office Controlled Parcels', 'PP': 'Parcels',
+	'PV': 'Empty NPCCS', 'DD': 'Departmental', 'DH': 'Civil Engineer',
+	'DI': 'Mechanical & Electrical Engineer', 'DQ': 'Stores', 'DT': 'Test',
+	'DY': 'Signal & Telecommunications Engineer', 'ZB': 'Locomotive & Brake Van',
+	'ZZ': 'Light Locomotive', 'J2': 'RfD Automotive (Components)', 'H2': 'RfD Automotive (Vehicles)',
+	'J3': 'RfD Edible Products (UK Contracts)', 'J4': 'RfD Industrial Minerals (UK Contracts)',
+	'J5': 'RfD Chemicals (UK Contracts)', 'J6': 'RfD Building Materials (UK Contracts)',
+	'J8': 'RfD General Merchandise (UK Contracts)', 'H8': 'RfD European',
+	'J9': 'RfD Freightliner (Contracts)', 'H9': 'RfD Freightliner (Other)',
+	'A0': 'Coal (Distributive)', 'E0': 'Coal (Electricity) MGR', 'B0': 'Coal (Other) and Nuclear',
+	'B1': 'Metals', 'B4': 'Aggregates', 'B5': 'Domestic and Industrial Waste',
+	'B6': 'Building Materials (TLF)', 'B7': 'Petroleum Products',
+	'H0': 'RfD European Channel Tunnel (Mixed Business)',
+	'H1': 'RfD European Channel Tunnel Intermodal',
+	'H3': 'RfD European Channel Tunnel Automotive',
+	'H4': 'RfD European Channel Tunnel Contract Services',
+	'H5': 'RfD European Channel Tunnel Haulmark', 'H6': 'RfD European Channel Tunnel Joint Venture' }
+cif_operating_chars = {
+	'B': 'Vacuum Braked', 'C': 'Timed at 100 m.p.h.', 'D': 'DOO (Coaching stock trains)',
+	'E': 'Conveys Mark 4 Coaches', 'G': 'Trainman (Guard) required', 'M': 'Timed at 110 m.p.h.',
+	'P': 'Push/Pull train', 'Q': 'Runs as required', 'R': 'Air conditioned with PA system',
+	'S': 'Steam Heated', 'Y': 'Runs to Terminals/Yards as required',
+	'Z': 'May convey traffic to SB1C gauge. Not to be diverted.' }
+cif_power_type = {
+	'D': 'Diesel/Steam', 'DEM': 'Diesel Electric Multiple Unit',
+	'DMU': 'Diesel Mechanical Multiple Unit', 'E': 'Electric', 'ED': 'Electro-Diesel',
+	'EML': 'EMU plus D, E, ED locomotive', 'EMU': 'Electric Multiple Unit',
+	'HST': 'High Speed Train' }
+cif_fields_maps = dict(
+	train_status=cif_train_status, train_category=cif_train_category,
+	operating_chars=cif_operating_chars, power_type=cif_power_type )
+
 
 class GTFSDB:
 
@@ -513,6 +556,44 @@ class GTFSDB:
 		if db_cif and train_uid:
 			train_assoc = train_uid.split('_')
 			train_assoc, train_uid_tuple = len(train_assoc) > 1, ','.join(map(self.escape, train_assoc))
+
+			print(f'{pre}cif train/sched info{cif_comment}:')
+			for train_uid, schedules in it.groupby(self.q(f'''
+					SELECT
+						id, train_uid,
+						train_status, train_category, train_identity, headcode, course_indicator,
+						profit_center, business_sector, power_type, timing_load, speed,
+						operating_chars, train_class, sleepers, reservations, connect_indicator,
+						catering_code, service_branding
+					FROM {db_cif}.schedule s
+					WHERE train_uid IN ({train_uid_tuple})
+					ORDER BY train_uid'''), op.attrgetter('train_uid')):
+				values = collections.defaultdict(lambda: collections.defaultdict(list))
+				values_by_train = collections.defaultdict(lambda: collections.defaultdict(set))
+				for s in schedules:
+					for k, v in s._asdict().items():
+						if k in ['id', 'train_uid']: continue
+						if v:
+							v_map = cif_fields_maps.get(k)
+							if v_map:
+								if k == 'operating_chars':
+									v = '[{}]'.format(' // '.join(v_map.get(v, f'{v} [raw]') for v in v))
+								else: v = v_map.get(str(v), f'{v} [raw]')
+						values[k][v].append((train_uid, s.id))
+						values_by_train[train_uid][k].add(v)
+				for k, vals in values.items():
+					if not set(vals.keys()).difference([None]): continue
+					for v, scheds in vals.items():
+						if len(values_by_train) > 1:
+							sched_info = list()
+							for train_uid, sched_id in scheds:
+								if len(values_by_train[train_uid][k]) == 1: sched_info.append(train_uid)
+								else: sched_info.append(f'{train_uid}.{sched_id}')
+							sched_info = f' ({", ".join(sched_info)})'
+						else: sched_info = ''
+						print(f'  {k}: {v}{sched_info}')
+
+			print(f'{pre}cif schedules{"/stops" if cif_stops else ""}{cif_comment}:')
 			sched_query = f'''
 				SELECT
 					s.train_uid, s.id, stp_indicator AS stp,
@@ -531,7 +612,6 @@ class GTFSDB:
 			sched_query = re.sub( r'[\t ]*-- (.*(\n|$))',
 				r'\1' if cif_stops else '', sched_query )
 			sched_query = re.sub('(?<=\S)\t+(?=\S)', ' ', sched_query).replace('\t', '  ')
-			print(f'{pre}cif schedules{"/stops" if cif_stops else ""}{cif_comment}:')
 			for s in self.q(sched_query):
 				days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
 				if cif_stops:
@@ -543,6 +623,7 @@ class GTFSDB:
 					print(
 						f'{pre}  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
 						'no-holidays' if s.always else '' )
+
 			assocs = list(self.q(f'''
 				SELECT
 					a.id, base_uid, assoc_uid, start_date AS a, end_date AS b,
