@@ -423,21 +423,26 @@ def dts_to_dt(dts, date=None):
 
 class GWCError(Exception): pass
 class GWCAPIError(GWCError): pass
+class GWCAPIErrorEmpty(GWCAPIError): pass
 class GWCAPIErrorCode(GWCAPIError): pass
 
 class GWCTestFoundDiffs(Exception): pass
-class GWCTestSkip(Exception): pass
 
-class GWCTestBatchFail(Exception):
-	def __init__(self, *exc_list): self.exc_list = exc_list
+class GWCTestSkip(Exception):
+	def __init__(self, api, msg):
+		self.api = api
+		super().__init__(msg)
+class GWCTestSkipTrip(GWCTestSkip): pass
 
 class GWCTestFail(Exception):
 	def __init__(self, api, trip, data, diff=None):
 		self.api, self.trip, self.diff, self.data = api, trip, diff, data
-
 class GWCTestFailNoJourney(GWCTestFail): pass
 class GWCTestFailStopNotFound(GWCTestFail): pass
 class GWCTestFailStopMismatch(GWCTestFail): pass
+
+class GWCTestBatchFail(Exception):
+	def __init__(self, *exc_list): self.exc_list = exc_list
 
 GWCTestResult = collections.namedtuple('GWCTestResult', 'success exc')
 
@@ -680,10 +685,11 @@ class GWCAPISerw:
 					if chk_code == err_code: break
 					if isinstance(chk_code, re_type) and chk_code.search(err_code): break
 				else: raise GWCAPIErrorCode(http_status, *err)
-		elif isinstance(data, dict) and 'result' not in data:
+		elif data and isinstance(data, dict) and 'result' not in data:
 			raise GWCAPIError(http_status, f'no "result" key in data - {data!r}')
 		if http_status != 200:
 			raise GWCAPIError(res.status, 'non-200 response status')
+		if not data: raise GWCAPIErrorEmpty(http_status, data)
 
 	def api_url(self, p, **q):
 		if not re.search('^(https?|ws):', p):
@@ -733,23 +739,29 @@ class GWCAPISerw:
 
 	st_type = enum.Enum('StationType', [('src', 'Origin'), ('dst', 'Destination')])
 
-	async def get_station(self, code_raw, t=None):
+	async def get_station(self, code_raw, t=None, check=False):
 		code = code_raw
 		if isinstance(code, int): code = f'{code:04d}'
 		if code.isdigit(): code = code[:4]
 		else: code = self.conf.serw_crs_nlc_map.get(code)
-		if code and len(code) == 4: return code
-		# XXX: fallback online lookup for arbitrary station name/code via /config/stations
-		# async with self.http.get(
-		# 		self.api_url('config/stations', search=crs, type=t.value) ) as res:
-		# 	await res.json()
+		if check:
+			assert isinstance(code_raw, str) and len(code_raw) == 3
+			res = await self.api_call(
+				'get', 'config/stations', q=dict(search=code_raw, type=t.value) )
+			for st_info in res['result']:
+				try: st_loc = res['links'][st_info['station']]
+				except KeyError: continue
+				nlc, crs = map(str, [st_loc['nlc'], st_loc['crs']])
+				if code_raw in [crs, nlc] or code in [crs, nlc]: return nlc
+		elif code and len(code) == 4: return code
 		raise GWCError(f'Falied to process station code to 4-digit nlc: {code_raw!r}')
 
 	async def get_journeys(self, src, dst, ts_dep=None):
 		'''Query API and return a list of journeys from src to dst,
 				starting at ts_dep UTC/BST datetime (without timezone, default: now) or later.
 			ts_dep can be either datetime or tuple to specify departure date/time range.
-			Default ts_dep range if only one datetime is specified is (ts_dep, ts_dep+3h).'''
+			Default ts_dep range if only one datetime is specified is (ts_dep, ts_dep+3h).
+			Returns None if this query cannot be performed, e.g. due to missing src/dst in API.'''
 
 		# Default is to use current time as ts_start and +3h as ts_end
 		if not ts_dep:
@@ -764,11 +776,14 @@ class GWCAPISerw:
 		ts_start, ts_end = (( ts if isinstance(ts, str)
 			else ts.strftime('%Y-%m-%dT%H:%M:%S') ) for ts in ts_dep )
 
-		jp_res = await self.api_call( 'post', 'jp/journey-plan',
-			dict( origin=src, destination=dst,
-				outward=dict(rangeStart=ts_start, rangeEnd=ts_end, arriveDepart='Depart'),
-				numJourneys=self.conf.test_trip_journeys, adults=1, children=0,
-				openReturn=False, disableGroupSavings=True, showCheapest=False, doRealTime=False ) )
+		try:
+			jp_res = await self.api_call( 'post', 'jp/journey-plan',
+				dict( origin=src, destination=dst,
+					outward=dict(rangeStart=ts_start, rangeEnd=ts_end, arriveDepart='Depart'),
+					numJourneys=self.conf.test_trip_journeys, adults=1, children=0,
+					openReturn=False, disableGroupSavings=True, showCheapest=False, doRealTime=False ) )
+		except GWCAPIErrorEmpty: return None
+
 		jp_urls = list(
 			urllib.parse.unquote_plus(res['journey'])
 			for res in jp_res['result']['outward'] )
@@ -788,15 +803,35 @@ class GWCAPISerw:
 		fail = self.conf.debug_trigger_mismatch
 		fail = fail.lower().split() if fail else list()
 
-		src, dst = (trip.stops[n].crs for n in [0, -1])
-		try:
-			src = await self.get_station(src, self.st_type.src)
-			dst = await self.get_station(dst, self.st_type.dst)
-		except GWCError as err: # XXX: query from API maybe?
-			raise GWCTestSkip(f'[{err_cls(err)}] {err}')
-
 		async with self.rate_sem:
-			jns = await self.get_journeys(src, dst, ts_dep=(trip.ts_start, trip.ts_end))
+			# Try fast query without checking whether stops are valid for API
+			src, dst = (trip.stops[n].crs for n in [0, -1])
+			try:
+				src_nlc = await self.get_station(src, self.st_type.src)
+				dst_nlc = await self.get_station(dst, self.st_type.dst)
+			except GWCError as err: jns = None
+			else: jns = await self.get_journeys(src_nlc, dst_nlc, ts_dep=(trip.ts_start, trip.ts_end))
+
+			if jns is None:
+				# Slower query, picking valid stops first, then looking for journeys again
+				ends = dict.fromkeys(['src', 'dst'])
+				stops = list(enumerate(map(op.attrgetter('crs'), trip.stops)))
+				n_chk, stops = -1, dict(src=iter(stops), dst=iter(reversed(stops)))
+				while not all(ends.values()):
+					for k in ends.keys():
+						if ends[k]: continue
+						n, crs = next(stops[k])
+						if n == n_chk: break # src=dst
+						n_chk = max(n_chk, n)
+						try: nlc = await self.get_station(crs, self.st_type[k], check=True)
+						except GWCError as err: continue
+						ends[k] = crs, nlc
+					else: continue
+					raise GWCTestSkipTrip(self.api_tag, 'trip has no api-valid stops')
+				(src, src_nlc), (dst, dst_nlc) = ends['src'], ends['dst']
+				self.log.warning( 'Limiting check to [{} {}]'
+					' segment due to api limitations for trip: {}', src, dst, trip )
+				jns = await self.get_journeys(src_nlc, dst_nlc, ts_dep=(trip.ts_start, trip.ts_end))
 
 		## Find one-direct-trip journey with matching train_uid
 		for jn in jns:
@@ -812,8 +847,9 @@ class GWCAPISerw:
 
 		## Match all stops/stop-times
 		# SERW API returns non-public stops (often duplicated), which are missing in gtfs
+		# Check is restricted to [src, dst] interval, can be subset of trip.stops
 		jn_stops_iter, mismatch_n = iter(jn_trip.stops), random.randrange(0, len(trip.stops))
-		for n, st1 in enumerate(trip.stops):
+		for n, st1 in it.dropwhile(lambda t: t[1].crs != src, enumerate(trip.stops)):
 			if n == mismatch_n and 'stopnotfound' in fail: st1.crs += 'x'
 			for st2 in jn_stops_iter:
 				if not st2.ts: continue # possible non-public duplicate before public one
@@ -832,6 +868,7 @@ class GWCAPISerw:
 				raise GWCTestFailStopMismatch( self.api_tag, trip,
 					diff=self.format_trip_diff(trip, jn_trip),
 					data=[jn_trip, st1.crs, (st1.ts, st2.ts), (ts_diff, self.conf.test_trip_time_slack)] )
+			if st1.crs == dst: break
 
 
 class GWCTestRunner:
@@ -905,10 +942,10 @@ class GWCTestRunner:
 		return self.db.escape(val)
 
 
-	async def _check_trip(self, trip, max_parallel):
+	async def _check_trip(self, trip, api_list, max_parallel):
 		'''Runs trip check on random apis with specified
 			max concurrency, preferring ones that are ready first.'''
-		api_list, pending = list(self.api_list), list()
+		pending, api_list = list(), list(filter(None, api_list))
 		try:
 			random.shuffle(api_list)
 			while api_list or pending:
@@ -926,13 +963,14 @@ class GWCTestRunner:
 				task.cancel()
 				await task
 
-	async def check_trip(self, trip, ts_start=None):
+	async def check_trip(self, trip, api_list=None, ts_start=None):
 		'''Checks trip info against API, passing
 			raised GWCTestFail exception(s) wrapped into GWCTestBatchFail.'''
+		if api_list is None: api_list = self.api_list
 		if ts_start: trip = trip.copy(ts_start=ts_start)
 		tm, tm_parallel = self.conf.test_match, self.conf.test_match_parallel
 		if tm is tm.any: tm_parallel = 1
-		test_result_iter = self._check_trip(trip, tm_parallel)
+		test_result_iter = self._check_trip(trip, api_list, tm_parallel)
 		if tm is tm.all:
 			async for res in test_result_iter:
 				if not res.success: raise GWCTestBatchFail(res.exc)
@@ -1128,20 +1166,27 @@ class GWCTestRunner:
 
 			# Check produced trip info against API(s)
 			self.stats['trip-check'] += 1
-			trip_diffs = list()
+			trip_diffs, trip_skip, api_list = list(), False, list(self.api_list)
 			for date in dates:
 				log_trip.debug('checking date: {}', date)
 				ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
 				self.stats['trip-check-date'] += 1
-				try: await self.check_trip(trip, ts_start=ts_src)
+				try: await self.check_trip(trip, api_list, ts_start=ts_src)
 				except GWCTestBatchFail as err_batch:
 					for err in err_batch.exc_list:
 						err_type = err_cls(err)
-						if isinstance(err, GWCTestSkip):
-							log_trip.debug('check skipped due to api limitation - {}', err)
+
+						if isinstance(err, GWCTestSkipTrip):
+							log_trip.debug('trip-check impossible using api [{}] - {}', err.api, err)
 							self.stats['trip-skip-api'] += 1
-							self.trip_log_update(t, '-skip-')
+							api_list = list(filter(lambda api: api.api_tag != err.api, api_list))
+							if not api_list: trip_skip = True
+							continue
+						elif isinstance(err, GWCTestSkip):
+							log_trip.debug('check skipped due to api [{}] limitation - {}', err.api, err)
+							self.stats['trip-skip-api-date'] += 1
 							continue # not actually a diff
+
 						elif not isinstance(err, GWCTestFail):
 							try: raise err from None
 							except Exception as err:
@@ -1150,7 +1195,9 @@ class GWCTestRunner:
 									lines=[ 'Unexpected error during trip check [BUG]',
 										('  trip: {}', trip), ('  error: [{}] {}', err_type, err) ])
 							err_api, err_type, err = 'core', 'bug', None
+
 						else: err_api = err.api
+
 						trip_diffs.append(f'{err_api}.{err_type}')
 						self.stats[f'diff-api-{err_api}'] += 1
 						self.stats[f'diff-type-{err_type}'] += 1
@@ -1163,11 +1210,14 @@ class GWCTestRunner:
 								err_info.extend(textwrap.indent(
 									err.diff or pformat_data(err.data), '  ' ).splitlines())
 							log_lines(self.log_diffs.error, err_info)
+
+				if trip_skip: break
 			self.stats['diff-total'] += len(trip_diffs)
 
 			if self.trip_log:
-				trip_diffs = '-match-' if not trip_diffs else ':'.join(sorted(set(trip_diffs)))
-				self.trip_log_update(t, trip_diffs)
+				if trip_skip: trip_res = '-skip-'
+				else: trip_res = '-match-' if not trip_diffs else ':'.join(sorted(set(trip_diffs)))
+				self.trip_log_update(t, trip_res)
 
 		log_lines(self.log.debug, ['Stats:', *(
 			'  {{}}: {}'.format('{:,}' if isinstance(v, int) else '{:.1f}').format(k, v)
