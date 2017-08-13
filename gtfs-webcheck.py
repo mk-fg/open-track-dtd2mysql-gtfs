@@ -837,9 +837,12 @@ class GWCAPISerw:
 					' segment due to api limitations for trip: {}', src, dst, trip )
 				jns = await self.get_journeys(src_nlc, dst_nlc, ts_dep=(trip.ts_start, trip.ts_end))
 
+		if jns is None: raise GWCTestSkipTrip(self.api_tag, 'api lookup fails')
+
 		## Find one-direct-trip journey with matching train_uid
 		for jn in jns:
 			if len(jn.trips) > 1: continue
+			if len(jn.trips) < 1: continue # underground-only or such - result, but no trains there
 			jn_trip = jn.trips[0]
 			if ( jn_trip.train_uid != trip.train_uid
 				and jn_trip.train_uid not in trip.train_uid.split('_') ): continue
