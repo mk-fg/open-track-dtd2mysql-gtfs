@@ -1155,10 +1155,14 @@ class GWCTestRunner:
 						self.stats[f'diff-api-{err_api}'] += 1
 						self.stats[f'diff-type-{err_type}'] += 1
 						if err:
-							log_lines(self.log_diffs.error, [
+							err_info = [
 								('API [{}] data mismatch for gtfs trip: {}', err_api, err_type),
-								('Trip: {}', trip), ('Date/time: {}', ts_src), 'Diff details:',
-								*textwrap.indent(err.diff or pformat_data(err.data), '  ').splitlines() ])
+								('Trip: {}', trip), ('Date/time: {}', ts_src) ]
+							if err.diff or err.data:
+								err_info.append('Diff details:')
+								err_info.extend(textwrap.indent(
+									err.diff or pformat_data(err.data), '  ' ).splitlines())
+							log_lines(self.log_diffs.error, err_info)
 			self.stats['diff-total'] += len(trip_diffs)
 
 			if self.trip_log:
