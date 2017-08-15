@@ -558,6 +558,7 @@ class GTFSDB:
 			train_assoc, train_uid_tuple = len(train_assoc) > 1, ','.join(map(self.escape, train_assoc))
 
 			print(f'{pre}cif train/sched info{cif_comment}:')
+			values = collections.defaultdict(lambda: collections.defaultdict(list))
 			for train_uid, schedules in it.groupby(self.q(f'''
 					SELECT
 						id, train_uid,
@@ -568,8 +569,6 @@ class GTFSDB:
 					FROM {db_cif}.schedule s
 					WHERE train_uid IN ({train_uid_tuple})
 					ORDER BY train_uid'''), op.attrgetter('train_uid')):
-				values = collections.defaultdict(lambda: collections.defaultdict(list))
-				values_by_train = collections.defaultdict(lambda: collections.defaultdict(set))
 				for s in schedules:
 					for k, v in s._asdict().items():
 						if k in ['id', 'train_uid']: continue
@@ -580,18 +579,23 @@ class GTFSDB:
 									v = '[{}]'.format(' // '.join(v_map.get(v, f'{v} [raw]') for v in v))
 								else: v = v_map.get(str(v), f'{v} [raw]')
 						values[k][v].append((train_uid, s.id))
-						values_by_train[train_uid][k].add(v)
-				for k, vals in values.items():
-					if not set(vals.keys()).difference([None]): continue
-					for v, scheds in vals.items():
-						if len(values_by_train) > 1:
-							sched_info = list()
-							for train_uid, sched_id in scheds:
-								if len(values_by_train[train_uid][k]) == 1: sched_info.append(train_uid)
-								else: sched_info.append(f'{train_uid}.{sched_id}')
-							sched_info = f' ({", ".join(sched_info)})'
-						else: sched_info = ''
-						print(f'{pre}  {k}: {v}{sched_info}')
+			for k, vals in values.items():
+				if not set(vals.keys()).difference([None]): continue
+				vals_print, train_count, sched_count = list(), set(), set()
+				for v, sched_info in vals.items():
+					trains, scheds = zip(*sched_info)
+					train_count.update(trains)
+					sched_count.update(scheds)
+					vals_print.append((v, sched_info))
+				for v, scheds in vals_print:
+					sched_info = set()
+					if len(vals_print) > 1:
+						for t,s in scheds:
+							if len(train_count) <= 1: t = None
+							if len(sched_count) <= 1: s = None
+							if t or s: sched_info.add('.'.join(map(str, filter(None, [t, s]))))
+					sched_info = ' ({})'.format(', '.join(sorted(sched_info))) if sched_info else ''
+					if v is not None: print(f'{pre}  {k}: {v}{sched_info}')
 
 			print(f'{pre}cif schedules{"/stops" if cif_stops else ""}{cif_comment}:')
 			sched_query = f'''
