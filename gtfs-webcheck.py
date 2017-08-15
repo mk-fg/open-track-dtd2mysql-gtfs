@@ -1016,10 +1016,10 @@ class GWCTestRunner:
 		if isinstance(pick_uids, int):
 			train_uid_checks = dict()
 			for k,c in pick_checks.items():
-				train_uid_set = await self.qb(
-					f'SELECT trip_headsign FROM trips'
-					f' WHERE {c} GROUP BY trip_headsign', flat=True )
-				train_uid_set = set(random.choices(train_uid_set, k=pick_uids))
+				train_uid_set = set(await self.qb(f'''
+					SELECT trip_headsign FROM trips
+					WHERE {c} GROUP BY trip_headsign
+					ORDER BY RAND() LIMIT {pick_uids}''', flat=True ))
 				train_uid_checks[k] = train_uid_set
 			train_uid_set, n = set(), sum(map(len, train_uid_checks.values()))
 			while len(train_uid_set) < pick_uids and n > 0:
