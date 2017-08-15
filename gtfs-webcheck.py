@@ -24,7 +24,9 @@ class TestConfig:
 	## test_pick_*: weights for picking which trips/days to test first.
 	# "seq" in all of these is a simple sequential pick.
 	test_pick_trip = dict(seq=1, assoc=0.5, z=0.2)
-	test_pick_date = dict(seq=1, bank_holiday=2, random=2)
+	test_pick_date = dict(
+		seq=0, seq_next_week=1e-5, # to avoid dates that are likely to change
+		seq_after_next_week=1, bank_holiday=2, random=2 )
 	test_pick_date_set = None # only pick dates from the set
 
 	## test_pick_special: use named iterator func for special trip/date selection.
@@ -1068,31 +1070,39 @@ class GWCTestRunner:
 			yield t, stops
 			self.trip_skip.add(t.trip_id)
 
-	def pick_dates(self, dates, weights=None):
+	def pick_dates(self, dates, weights=None, current=None):
 		'Pick dates to test according to weights in conf.test_pick_date.'
+		if not current: current = dt.date.today()
 		dates, weights = list(dates), weights or self.conf.test_pick_date or dict(seq=1)
 		if not dates: return dates
-		dates_pick, dates_iter = list(), iter(dates)
+		dates_pick, week_pos = list(), bisect.bisect_left(dates, current + dt.timedelta(7))
+		pick_seq = dict(
+			seq=iter(dates),
+			seq_next_week=iter(dates[:week_pos]),
+			seq_after_next_week=iter(dates[week_pos:]) )
 		dates_holidays = (self.conf.bank_holidays or set()).intersection(dates)
-		while len(dates_pick) < min(len(dates), self.conf.test_trip_dates):
+		weights = dict((k,v) for k,v in weights.items() if v > 0)
+		while weights and len(dates_pick) < min(len(dates), self.conf.test_trip_dates):
 			pick = random_weight(weights)
-			if pick == 'seq':
-				for date in dates_iter:
-					if date not in dates_pick: break
-				dates_pick.append(date)
+			if pick in pick_seq:
+				for date in pick_seq[pick]:
+					if date not in dates_pick:
+						dates_pick.append(date)
+						break
+				else: del weights[pick]
 			elif pick == 'bank_holiday':
-				if not dates_holidays:
-					if len(weights) == 1: break # to avoid inf-loop
-					continue
-				dates_pick.append(dates_holidays.pop())
-			elif pick == 'random':
-				while True:
-					date = random.choice(list(set(dates).difference(dates_pick)))
+				date = None
+				while dates_holidays:
+					date = dates_holidays.pop()
 					if date not in dates_pick: break
-				dates_pick.append(date)
+				if date: dates_pick.append(date)
+				else: del weights[pick]
+			elif pick == 'random':
+				dates_left = list(set(dates).difference(dates_pick))
+				if dates_left: dates_pick.append(random.choice(dates_left))
+				else: del weights[pick]
 			else: raise ValueError(pick)
 		return dates_pick
-
 
 	def pick_dates_holidays(self, dates):
 		return self.pick_dates(dates, weights=dict(bank_holiday=1))
@@ -1164,7 +1174,7 @@ class GWCTestRunner:
 				dt.date.today() + dt.timedelta(self.conf.date_max_future_offset) )]
 			if self.conf.test_pick_date_set:
 				dates = sorted(self.conf.test_pick_date_set.intersection(dates))
-			dates = pick_dates(dates)
+			dates = pick_dates(dates, current=date_current)
 			if not dates:
 				# log_trip.debug('no valid dates to check, skipping')
 				self.stats['trip-skip-dates'] += 1
