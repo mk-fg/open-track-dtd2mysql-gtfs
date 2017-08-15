@@ -1323,7 +1323,7 @@ def main(args=None, conf=None):
 	group.add_argument('--debug-cache-dir', metavar='path',
 		help='Cache API requests to dir if missing, or re-use cached ones from there.')
 	group.add_argument('--debug-http-dir', metavar='path',
-		help='Directory path to dump http various responses and headers to.')
+		help='Directory path to dump various http request/response info to.')
 	group.add_argument('-x', '--debug-trigger-mismatch', metavar='type',
 		help='Trigger data mismatch of specified type in all tested entries.'
 			' Supported types correspond to implemented GWCTestFail'
