@@ -1402,8 +1402,12 @@ def main(args=None, conf=None):
 		conf.test_pick_date_set = set(
 			dt.date(*map(int, d.split('-', 2))) for d in opts.test_date.split() )
 
-	if opts.debug_http_dir: conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
-	if opts.debug_cache_dir: conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
+	if opts.debug_http_dir:
+		conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
+		conf.debug_http_dir.mkdir(parents=True, exist_ok=True)
+	if opts.debug_cache_dir:
+		conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
+		conf.debug_cache_dir.mkdir(parents=True, exist_ok=True)
 	if opts.debug_trigger_mismatch: conf.debug_trigger_mismatch = opts.debug_trigger_mismatch
 	if opts.debug_rng_seed: random.seed(opts.debug_rng_seed)
 
