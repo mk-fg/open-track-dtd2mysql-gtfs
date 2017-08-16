@@ -452,11 +452,11 @@ GWCTestResult = collections.namedtuple('GWCTestResult', 'success exc')
 class GWCTripStop:
 
 	def __init__(self, crs, ts, pickup, dropoff, **meta):
-		pickup, dropoff = ((GTFSEmbarkType.regular if v is True else v) for v in [pickup, dropoff])
+		pickup, dropoff = map(GTFSEmbarkType, [pickup, dropoff])
 		self.crs, self.ts, self.pickup, self.dropoff, self.meta = crs, ts, pickup, dropoff, meta
 
 	def __repr__(self):
-		embark = '-P'[bool(self.pickup)] + '-D'[bool(self.dropoff)]
+		embark = '-P'[self.pickup != GTFSEmbarkType.none] + '-D'[self.dropoff != GTFSEmbarkType.none]
 		ts = str(self.ts) if self.ts else 'x'
 		return f'<TS {self.crs} {self.meta.get("nlc", "x")} {embark} {ts}>'
 
@@ -470,6 +470,8 @@ class GWCTrip:
 			Normal=(True, True), Passing=(False, False),
 			PickUpOnly=(True, False), SetDownOnly=(False, True),
 			RequestStop=(False, GTFSEmbarkType.driver) )
+		embark_flags_dict = {
+			True: GTFSEmbarkType.regular, False: GTFSEmbarkType.none }
 		src, dst, trip_stops, ts0 = sig.src, sig.dst, list(), None
 		for stop in stops:
 			stop_info = links[stop['station']]
@@ -482,6 +484,7 @@ class GWCTrip:
 			name, crs, nlc = op.itemgetter('name', 'crs', 'nlc')(stop_info)
 			lat, lon = (stop_info.get(k) for k in ['latitude', 'longitude'])
 			if src and src != crs: continue
+			pickup, dropoff = (embark_flags_dict.get(v, v) for v in [pickup, dropoff])
 			src = trip_stops.append(GWCTripStop(
 				crs, ts, pickup, dropoff, name=name, nlc=nlc, lat=lat, lon=lon ))
 			if dst == crs: break
@@ -491,6 +494,9 @@ class GWCTrip:
 	def from_gtfs_stops(cls, train_uid, stops, ts_src=None):
 		trip_stops = list(GWCTripStop( s.stop_id,
 			s.departure_time, s.pickup_type, s.drop_off_type ) for s in stops)
+		trip_stops = list(filter(lambda st: not (
+			st.pickup == GTFSEmbarkType.none
+			and st.dropoff == GTFSEmbarkType.none ), trip_stops))
 		return cls(train_uid, trip_stops, ts_src)
 
 	def __init__(self, train_uid, stops, ts_start=None, ts_end=None):
@@ -860,6 +866,8 @@ class GWCAPISerw:
 		jn_stops_iter, mismatch_n = iter(jn_trip.stops), random.randrange(0, len(trip.stops))
 		for n, st1 in it.dropwhile(lambda t: t[1].crs != src, enumerate(trip.stops)):
 			if n == mismatch_n and 'stopnotfound' in fail: st1.crs += 'x'
+			if ( st1.pickup == GTFSEmbarkType.none
+				and st1.dropoff == GTFSEmbarkType.none ): continue
 			for st2 in jn_stops_iter:
 				if not st2.ts: continue # possible non-public duplicate before public one
 				if st1.crs == st2.crs: break
