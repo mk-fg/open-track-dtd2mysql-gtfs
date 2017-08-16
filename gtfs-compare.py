@@ -648,7 +648,7 @@ class GTFSDB:
 			if assocs or train_assoc:
 				print(f'{pre}cif associations{cif_comment}:')
 				for a in assocs:
-					days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
+					days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, a.days)))
 					print(
 						( f'{pre}  {a.base_uid} {a.assoc_uid} {a.id:>7d}'
 							f' {a.stp} {a.assoc_cat or "--"} {{}} {a.crs_code} {a.a} {a.b} {days}' )\
