@@ -866,8 +866,6 @@ class GWCAPISerw:
 		jn_stops_iter, mismatch_n = iter(jn_trip.stops), random.randrange(0, len(trip.stops))
 		for n, st1 in it.dropwhile(lambda t: t[1].crs != src, enumerate(trip.stops)):
 			if n == mismatch_n and 'stopnotfound' in fail: st1.crs += 'x'
-			if ( st1.pickup == GTFSEmbarkType.none
-				and st1.dropoff == GTFSEmbarkType.none ): continue
 			for st2 in jn_stops_iter:
 				if not st2.ts: continue # possible non-public duplicate before public one
 				if st1.crs == st2.crs: break
