@@ -43,7 +43,7 @@ class TestConfig:
 	test_trip_dates = 3
 	test_trip_embark_delay = dt.timedelta(seconds=20*60)
 	test_trip_journeys = 6 # should be high enough for testee direct trip to be there
-	test_trip_time_slack = 5*60 # max diff in stop times
+	test_trip_time_slack = 0 # max diff in stop times
 
 	trip_diff_cmd = 'diff -uw' # for pretty-printing diffs between trip stops
 	date_max_future_offset = 80 # don't pick future dates further than that
