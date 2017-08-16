@@ -46,7 +46,8 @@ In particular:
   Requirements:
   Python-3.6+,
   `aiohttp <http://aiohttp.readthedocs.io/>`_,
-  `aiomysql <http://aiomysql.readthedocs.io/>`_.
+  `aiomysql <http://aiomysql.readthedocs.io/>`_,
+  (only if using config file) `pyyaml <http://pyyaml.org/>`_.
 
 
 For all scripts, most MySQL-related parameters should be specified via
@@ -119,22 +120,18 @@ Usage examples
   2017-10-05`` restricts check to a specific date.
 
   For longer runs, see --trip-id-log/--diff-log parameters, rate-limiting, as
-  well as other configuration params, most of which are only available in
-  TestConfig at the top of the script itself at the moment.
+  well as other configuration params, which can also be specified via YAML
+  config file (requires `pyyaml <http://pyyaml.org/>`_ module)::
+
+    % pip3 install --user pyyaml
+
+    % ./gtfs-webcheck.py -c doc/gtfs-webcheck.example.yaml
+
+  (see doc/gtfs-webcheck.example.yaml file for possible configuration options)
 
 - Manually query cif/gtfs data (to check for any mismatches)::
 
     % ./gtfs-compare.py query -c cif -d gtfs_py -u P04358
-
-    cif schedules/stops:
-      P04358  216245 P 2017-08-28 2017-08-28 1...... A PAD --:-- 02:13
-      P04358  216245 P 2017-08-28 2017-08-28 1...... A XTH 03:38 --:--
-    gtfs trips:
-      [216245] svc=1566 svc_days=1:
-        <TS 1...... [2017-08-28 2017-08-28] {}>
-        stop sequence:
-          PAD 02:13 02:13
-          XTH 03:38 03:38
 
   Aside from ``-u/--train-uid``, there are also ``-t/--trip-id`` (GTFS trip) and
   ``-s/--stop-crs`` (all CIF info for stop/station) queries.

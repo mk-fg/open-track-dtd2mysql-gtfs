@@ -22,7 +22,7 @@ class TestConfig:
 	test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
 
 	## test_pick_*: weights for picking which trips/days to test first.
-	# "seq" in all of these is a simple sequential pick.
+	## "seq" in all of these is a simple sequential pick.
 	test_pick_trip = dict(seq=1, assoc=0.5, z=0.2)
 	test_pick_date = dict(
 		seq=0, seq_next_week=1e-5, # to avoid dates that are likely to change
@@ -30,6 +30,7 @@ class TestConfig:
 	test_pick_date_set = None # only pick dates from the set
 
 	## test_pick_special: use named iterator func for special trip/date selection.
+	##   holidays - pick from bank_holidays list (can also be read from cli-specified file)
 	test_pick_special = None
 	test_pick_special_iters = {'bank-holidays-only': 'holidays'}
 
@@ -40,19 +41,26 @@ class TestConfig:
 	test_trip_log = None
 
 	# XXX: negative tests - specifically pick bank holidays and exception days
-	test_trip_dates = 3
-	test_trip_embark_delay = dt.timedelta(seconds=20*60)
-	test_trip_journeys = 6 # should be high enough for testee direct trip to be there
-	test_trip_time_slack = 0 # max diff in stop times
+	test_trip_dates = 3 # how many dates to pick and test per trip (using test_pick_date weights)
+	test_trip_embark_delay = dt.timedelta(seconds=20*60) # departure time offset for queries
+	test_trip_journeys = 6 # api result count, should be high enough for direct trip to be there
+	test_trip_time_slack = 0 # max diff in stop times to ignore
 
 	trip_diff_cmd = 'diff -y' # for pretty-printing diffs between trip stops
 	date_max_future_offset = 80 # don't pick future dates further than that
 	bank_holidays = None
 
-	mysql_db_name = None
+	## rate_*: parameters for introducing delays between tests to lessen api load.
+	rate_interval = 1 # seconds
+	rate_max_concurrency = 1 # only makes sense if tests take longer than rate_interval
+	rate_min_seq_delay = 0 # seconds, only if rate_max_concurrency=1
+
+	## mysql_*: database options, can also be specified via cli.
+	mysql_db_name = 'gtfs'
 	mysql_conn_opts = None
 	mysql_sql_mode = 'strict_all_tables'
 
+	## serw_*: southeasternrailway.co.uk api options.
 	serw_api_url = 'https://api.southeasternrailway.co.uk'
 	serw_crs_nlc_map = None
 	serw_http_headers = {
@@ -68,16 +76,22 @@ class TestConfig:
 		('Warning', re.compile(r'^Iptis[A-Z]')) }
 	serw_api_debug = False
 
-	rate_interval = 1 # seconds
-	rate_max_concurrency = 1
-	rate_min_seq_delay = 0 # seconds, only if rate_max_concurrency=1
-
+	## debug_*: misc debug options - see corresponding command line parameters.
 	debug_http_dir = None
 	debug_cache_dir = None
 	debug_trigger_mismatch = None
 
-	def __init__(self):
+	def __init__(self, path=None):
+		if path: self._update_from_file(path)
 		self._debug_files = collections.Counter()
+
+	def _update_from_file(self, path):
+		import yaml # http://pyyaml.org/
+		with path.open() as src: conf = yaml.safe_load(src)
+		for k,v in conf.items():
+			if k == 'test_match': v = self.test_match[v]
+			if k == 'test_trip_embark_delay': v = dt.timedelta(seconds=v)
+			setattr(self, k, v)
 
 
 class AsyncExitStack:
@@ -1188,7 +1202,7 @@ class GWCTestRunner:
 			dates = dates[:bisect.bisect_left( dates,
 				dt.date.today() + dt.timedelta(self.conf.date_max_future_offset) )]
 			if self.conf.test_pick_date_set:
-				dates = sorted(self.conf.test_pick_date_set.intersection(dates))
+				dates = sorted(set(self.conf.test_pick_date_set).intersection(dates))
 			dates = pick_dates(dates, current=date_current)
 			if not dates:
 				# log_trip.debug('no valid dates to check, skipping')
@@ -1286,10 +1300,15 @@ def main(args=None, conf=None):
 	parser = argparse.ArgumentParser(
 		description='Tool to test gtfs feed (stored in mysql) against online data sources.')
 
+	group = parser.add_argument_group('Configuration')
+	group.add_argument('-c', '--conf', metavar='file',
+		help='YAML configuration file to read, overriding any defaults with values there.'
+			' Requires "pyyaml" module. See doc/gtfs-webcheck.example.yaml for example.')
+
 	group = parser.add_argument_group('Testing options')
-	group.add_argument('-s', '--trip-id-log', metavar='path',
+	group.add_argument('-s', '--trip-id-log', metavar='file',
 		help='Append each checked trip_id to specified file, and skip ones that are already there.')
-	group.add_argument('-f', '--diff-log', metavar='path',
+	group.add_argument('-f', '--diff-log', metavar='file',
 		help='Log diffs to a specified file'
 				' (using WatchedFileHandler) instead of stderr that default logging uses.'
 			' "-" or "1" can be used for stdout, any integer value for other open fds.')
@@ -1307,15 +1326,13 @@ def main(args=None, conf=None):
 		help='Use special named trip/date selection iterators. Choices: %(choices)s')
 
 	group = parser.add_argument_group('MySQL db parameters')
-	group.add_argument('-d', '--gtfs-db-name',
-		default='gtfs', metavar='db-name',
-		help='Database name to read GTFS data from (default: %(default)s).')
-	group.add_argument('--mycnf-file',
-		metavar='path', default=str(pathlib.Path('~/.my.cnf').expanduser()),
+	group.add_argument('-d', '--gtfs-db-name', metavar='db-name',
+		help=f'Database name to read GTFS data from (default: {conf.mysql_db_name}).')
+	group.add_argument('--mycnf-file', metavar='file',
 		help='Alternative ~/.my.cnf file to use to read all connection parameters from.'
 			' Parameters there can include: host, port, user, passwd, connect,_timeout.'
 			' Overidden parameters:'
-				' db (specified via --src-cif-db/--dst-gtfs-db options),'
+				' db (specified via --gtfs-db-name option),'
 				' charset=utf8mb4 (for max compatibility).')
 	group.add_argument('--mycnf-group', metavar='group',
 		help='Name of "[group]" (ini section) in ~/.my.cnf ini file to use parameters from.')
@@ -1324,7 +1341,7 @@ def main(args=None, conf=None):
 	group.add_argument('--bank-holiday-list',
 		metavar='file', default='doc/UK-bank-holidays.csv',
 		help='List of dates, one per line, for bank holidays, used only'
-			' for testing priorities, "-" or empty value to disable. Default: %(default)s')
+			' for testing priorities, "-" or empty value to disable. Default: %(default)s (if exists).')
 	group.add_argument('--bank-holiday-fmt',
 		metavar='strptime-format', default='%d-%b-%Y',
 		help='strptime() format for each line in --bank-holiday-list file. Default: %(default)s')
@@ -1335,9 +1352,9 @@ def main(args=None, conf=None):
 			' Empty value or "-" will create empty mapping. Default: %(default)s')
 
 	group = parser.add_argument_group('Misc dev/debug options')
-	group.add_argument('--debug-cache-dir', metavar='path',
+	group.add_argument('--debug-cache-dir', metavar='file',
 		help='Cache API requests to dir if missing, or re-use cached ones from there.')
-	group.add_argument('--debug-http-dir', metavar='path',
+	group.add_argument('--debug-http-dir', metavar='file',
 		help='Directory path to dump various http request/response info to.')
 	group.add_argument('-x', '--debug-trigger-mismatch', metavar='type',
 		help='Trigger data mismatch of specified type in all tested entries.'
@@ -1348,6 +1365,8 @@ def main(args=None, conf=None):
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
+
+	if opts.conf: conf._update_from_file(pathlib.Path(opts.conf))
 
 	sys.stdout = open(sys.stdout.fileno(), 'w', 1)
 	logging.basicConfig(
@@ -1401,15 +1420,16 @@ def main(args=None, conf=None):
 				for line in src.read().splitlines():
 					conf.bank_holidays.add(dt.datetime.strptime(line, opts.bank_holiday_fmt).date())
 
+	mycnf_path = opts.mycnf_file or str(pathlib.Path('~/.my.cnf').expanduser())
 	conf.mysql_conn_opts = dict(filter(op.itemgetter(1), dict(
-		read_default_file=opts.mycnf_file, read_default_group=opts.mycnf_group ).items()))
-	conf.mysql_db_name = opts.gtfs_db_name
+		read_default_file=mycnf_path, read_default_group=opts.mycnf_group ).items()))
+	if opts.gtfs_db_name: conf.mysql_db_name = opts.gtfs_db_name
 
 	if opts.test_train_uid:
 		conf.test_train_uids = opts.test_train_uid.split()
 		if opts.test_train_limit:
 			conf.test_train_uids = conf.test_train_uids[:opts.test_train_limit]
-	else: conf.test_train_uids = opts.test_train_limit
+	elif opts.test_train_limit: conf.test_train_uids = opts.test_train_limit
 
 	if opts.test_special:
 		conf.test_pick_special = conf.test_pick_special_iters[opts.test_special]

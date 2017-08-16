@@ -1,0 +1,66 @@
+### Configuration file example for gtfs-webcheck.py
+### All settings here are optional, with defaults hardcoded in the script.
+### Options specified on the command line override values here.
+
+## test_match: how to select API to match gtfs data (e.g. trip) against.
+##  all - query all APIs for match
+##  any - query one API at random
+##  first - query APIs until match is found
+# test_match: any
+# test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
+
+## test_pick_*: weights for picking which trips/days to test first.
+## "seq" in all of these is a simple sequential pick.
+# test_pick_trip: {seq: 1, assoc: 0.5, z: 0.2}
+# test_pick_date: {
+#   seq: 0, seq_next_week: 1e-5, # to avoid dates that are likely to change
+#   seq_after_next_week: 1, bank_holiday: 2, random: 2 }
+# test_pick_date_set: [2017-09-25] # only pick dates from the set
+
+## test_pick_special: use named iterator func for special trip/date selection.
+##   holidays - pick from bank_holidays list (can also be read from cli-specified file)
+# test_pick_special: holidays
+
+## test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
+# test_train_uids: 50
+# test_train_uids: [C74096_C74099]
+
+## test_trip_log: path to file to append tested trip_id's to and skip ones already there.
+# test_trip_log: trips-done.log
+
+## Misc testing parameters
+# test_trip_dates: 3 # how many dates to pick and test per trip (using test_pick_date weights)
+# test_trip_embark_delay: 1800 # departure time offset for queries from first trip stop time
+# test_trip_journeys: 6 # should be high enough for direct trip to be there
+# test_trip_time_slack: 0 # max diff in stop times to ignore
+# trip_diff_cmd: 'diff -y' # for pretty-printing diffs between trip stops
+# date_max_future_offset: 80 # don't pick future dates further than that
+# bank_holidays: [2017-08-28] # see --bank-holiday-list cli option
+
+## rate_*: parameters for introducing delays between tests to lessen api load.
+# rate_interval: 1 # seconds
+# rate_max_concurrency: 1 # only makes sense if tests take longer than rate_interval
+# rate_min_seq_delay: 0 # seconds, only if rate_max_concurrency=1
+
+## mysql_*: database options, can also be specified via cli.
+# mysql_db_name: gtfs_ts
+# mysql_conn_opts: {charset: utf8mb4}
+# mysql_sql_mode: 'strict_all_tables'
+
+## serw_*: southeasternrailway.co.uk api options.
+# serw_api_url: 'https://api.southeasternrailway.co.uk'
+# serw_crs_nlc_map:
+# serw_http_headers: {
+#   'Accept': 'application/json',
+#   'Content-Type': 'application/json',
+#   'Origin': 'https://ticket.southeasternrailway.co.uk',
+#   'x-access-token':
+#     'otrl|a6af56be1691ac2929898c9f68c4b49a0a2d930849770dba976be5d792a',
+#   'User-Agent': 'gtfs-webcheck/1.0 (+https://github.com/mk-fg/open-track-dtd2mysql-gtfs/)',
+# }
+# serw_api_debug: false
+
+## debug_*: misc debug options - see corresponding command line parameters.
+# debug_http_dir:
+# debug_cache_dir:
+# debug_trigger_mismatch:
