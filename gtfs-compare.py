@@ -567,7 +567,7 @@ class GTFSDB:
 
 			print(f'{pre}cif train/sched info{cif_comment}:')
 			values = collections.defaultdict(lambda: collections.defaultdict(list))
-			for train_uid, schedules in it.groupby(self.q(f'''
+			for sched_train_uid, schedules in it.groupby(self.q(f'''
 					SELECT
 						id, train_uid,
 						train_status, train_category, train_identity, headcode, course_indicator,
@@ -586,7 +586,7 @@ class GTFSDB:
 								if k == 'operating_chars':
 									v = '[{}]'.format(' // '.join(v_map.get(v, f'{v} [raw]') for v in v))
 								else: v = v_map.get(str(v), f'{v} [raw]')
-						values[k][v].append((train_uid, s.id))
+						values[k][v].append((sched_train_uid, s.id))
 			for k, vals in values.items():
 				if not set(vals.keys()).difference([None]): continue
 				vals_print, train_count, sched_count = list(), set(), set()
@@ -660,6 +660,7 @@ class GTFSDB:
 				SELECT
 					t.trip_id,
 					t.service_id AS svc_id,
+					t.trip_headsign AS train_uid,
 					st.stop_id AS id,
 					st.stop_sequence AS seq,
 					st.arrival_time AS ts_arr,
@@ -694,7 +695,8 @@ class GTFSDB:
 					extra_days = set(row.date for row in days if row.exc == 1)
 					span = GTFSTimespan(svc.a, svc.b, tuple(map(int, svc.days)), exc_days)
 					svc_days.update(it.chain(span.date_iter(), extra_days))
-				print(f'{pre}  [{trip_id}] svc={trip.svc_id} svc_days={len(svc_days)}:')
+				print( f'{pre}  [{trip_id}] headsign={trip.train_uid}'
+					f' svc={trip.svc_id} svc_days={len(svc_days)}:' )
 				print(f'{pre}    {span}')
 				if extra_days: print(f'{pre}    extra days:', ',  '.join(map(str, extra_days)))
 				print(f'{pre}    stop sequence:')
