@@ -827,7 +827,9 @@ class GWCAPISerw:
 				dst_nlc = await self.get_station(dst, self.st_type.dst)
 				if src_nlc == dst_nlc: raise GWCError
 			except GWCError as err: jns = None
-			else: jns = await self.get_journeys(src_nlc, dst_nlc, ts_dep=(trip.ts_start, trip.ts_end))
+			else:
+				jns = await self.get_journeys(
+					src_nlc, dst_nlc, ts_dep=(trip.ts_start, trip.ts_end) )
 
 			if jns is None:
 				# Slower query, picking valid stops first, then looking for journeys again
@@ -854,17 +856,16 @@ class GWCAPISerw:
 		if jns is None: raise GWCTestSkipTrip(self.api_tag, 'api lookup fails')
 
 		## Find one-direct-trip journey with matching train_uid
-		for jn in jns:
-			if len(jn.trips) > 1: continue
-			if len(jn.trips) < 1: continue # underground-only or such - result, but no trains there
-			jn_trip = jn.trips[0]
-			if ( jn_trip.train_uid != trip.train_uid
-				and jn_trip.train_uid not in trip.train_uid.split('_') ): continue
+		# Failing that, try to get trip with one of the trains of the association
+		jns = dict((jn.trips[0].train_uid, jn) for jn in jns if len(jn.trips) == 1)
+		for train_uid in [trip.train_uid, *trip.train_uid.split('_')]:
+			if train_uid not in jns: continue
 			if 'nojourney' in fail:
-				jn_trip.train_uid += 'x'
+				jn.trips[0].train_uid += 'x'
 				continue
 			break
 		else: raise GWCTestFailNoJourney(self.api_tag, trip, jns)
+		jn_trip = jns[train_uid].trips[0]
 
 		## Match all stops/stop-times
 		# SERW API returns non-public stops (often duplicated), which are missing in gtfs
