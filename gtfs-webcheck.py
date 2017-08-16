@@ -462,7 +462,7 @@ class GWCTripStop:
 
 class GWCTrip:
 
-	TripSig = collections.namedtuple('TripSig', 'src dst train_uid ts_src')
+	TripSig = collections.namedtuple('TripSig', 'src dst train_uid_list ts_src')
 
 	@classmethod
 	def from_serw_cps(cls, sig, stops, links):
@@ -488,7 +488,9 @@ class GWCTrip:
 			src = trip_stops.append(GWCTripStop(
 				crs, ts, pickup, dropoff, name=name, nlc=nlc, lat=lat, lon=lon ))
 			if dst == crs: break
-		return cls(sig.train_uid, trip_stops, sig.ts_src)
+		train_uid = ( sig.train_uid_list[0] if len(sig.train_uid_list) == 1
+			else '{}_{}'.format(sig.train_uid_list[0], sig.train_uid_list[-1]) )
+		return cls(train_uid, trip_stops, sig.ts_src, sig_train_uid_list=sig.train_uid_list)
 
 	@classmethod
 	def from_gtfs_stops(cls, train_uid, stops, ts_src=None):
@@ -499,8 +501,8 @@ class GWCTrip:
 			and st.dropoff == GTFSEmbarkType.none ), trip_stops))
 		return cls(train_uid, trip_stops, ts_src)
 
-	def __init__(self, train_uid, stops, ts_start=None, ts_end=None):
-		self.train_uid, self.stops = train_uid, stops
+	def __init__(self, train_uid, stops, ts_start=None, ts_end=None, **meta):
+		self.train_uid, self.stops, self.meta = train_uid, stops, meta
 		if stops and (ts_start or ts_end):
 			stops_ts = list(filter(op.attrgetter('ts'), stops))
 			if not ts_start:
@@ -512,8 +514,13 @@ class GWCTrip:
 		self.ts_start, self.ts_end = ts_start, ts_end
 
 	def __repr__(self):
+		train_uld_list = self.meta.get('sig_train_uid_list') or ''
+		if train_uld_list: # to show weird trip signatures with asterisks
+			if set(train_uld_list) != set(self.train_uid.split('_')):
+				train_uld_list = ' ({})'.format(' '.join(train_uld_list))
+			else: train_uld_list = ''
 		return (
-			f'<Trip {self.train_uid}'
+			f'<Trip {self.train_uid}{train_uld_list}'
 				f' [{self.ts_start or "-"} {self.ts_end or "-"}]'
 				f' [{" - ".join(ts.crs for ts in self.stops)}]>' )
 
@@ -590,15 +597,14 @@ class GWCJn:
 			src, dst, date1, train_info = sig_key.split(';', 3)
 			if not train_info: continue # non-train trips, e.g. bus, underground, foot, etc
 			train_uid, date2 = train_info.split('|', 1)
+			train_uid_list = [train_uid]
 			while ';' in date2:
 				date2, assoc_stop, train_info = date2.split(';', 2)
 				assoc_uid, date2 = train_info.split('|', 1)
-				train_uid = f'{train_uid}_{assoc_uid}'
-			if '_' in train_uid: # cut down to "first-uid_last-uid" for complex assocs
-				train_uid = '{}_{}'.format(train_uid.split('_', 1)[0], train_uid.rsplit('_', 1)[-1])
+				train_uid_list.append(assoc_uid)
 			src, dst = (cps['links'][f'/data/stations/{s}']['crs'] for s in [src, dst])
 			sig_n, jst = jn_sig.trip_index(src, dst)
-			sig = GWCTrip.TripSig(src, dst, train_uid, jst.ts_src)
+			sig = GWCTrip.TripSig(src, dst, train_uid_list, jst.ts_src)
 			trip_order.append((sig_n, sig_key, sig))
 		trip_order.sort()
 
