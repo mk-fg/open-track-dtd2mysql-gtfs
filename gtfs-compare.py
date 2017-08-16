@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import itertools as it, operator as op, functools as ft
-import os, sys, contextlib, logging, pathlib, re, warnings, locale
+import os, sys, contextlib, logging, pathlib, re, warnings, locale, enum
 import collections, time, csv, datetime, pprint, textwrap, random
 
 import pymysql, pymysql.cursors # https://pymysql.readthedocs.io/
@@ -167,6 +167,14 @@ def stop_seq_str(seq):
 		f'{stop}[{{}}]'.format(
 			f'{dts_arr}/{dts_dep}' if dts_arr != dts_dep else dts_arr )
 		for stop, dts_arr, dts_dep in seq )
+
+GTFSEmbarkType = enum.IntEnum('EmbarkType', 'regular none phone driver', start=0)
+
+def embark_format(t, v, reg_short=None):
+	if reg_short and v == GTFSEmbarkType.regular: v = reg_short
+	elif v == GTFSEmbarkType.none: v = '-'
+	else: v = f'[{t}={p.name}]'
+	return v
 
 cif_train_status = {
 	'B': 'bus', 'F': 'freight', 'P': 'passenger/parcels', 'S': 'ship', 'T': 'trip',
@@ -655,7 +663,9 @@ class GTFSDB:
 					st.stop_id AS id,
 					st.stop_sequence AS seq,
 					st.arrival_time AS ts_arr,
-					st.departure_time AS ts_dep
+					st.departure_time AS ts_dep,
+					st.pickup_type AS pickup,
+					st.drop_off_type AS dropoff
 				FROM {db_gtfs}.trips t
 				LEFT JOIN {db_gtfs}.stop_times st USING(trip_id)
 				WHERE {"t.trip_headsign = %s" if train_uid else "t.trip_id = %s"}
@@ -666,7 +676,8 @@ class GTFSDB:
 					for st in [trip, *stops]:
 						if st.ts_arr: ts_arr = dts_format(st.ts_arr or st.ts_dep)
 						if st.ts_dep: ts_dep = dts_format(st.ts_dep or st.ts_arr)
-						trip_stops.append((st.id, ts_arr, ts_dep))
+						trip_stops.append(( st.id, ts_arr, ts_dep,
+							*map(GTFSEmbarkType, [st.pickup, st.dropoff]) ))
 				calendars = self.q(f'''
 					SELECT
 						service_id AS id, start_date AS a, end_date AS b,
@@ -687,8 +698,9 @@ class GTFSDB:
 				print(f'{pre}    {span}')
 				if extra_days: print(f'{pre}    extra days:', ',  '.join(map(str, extra_days)))
 				print(f'{pre}    stop sequence:')
-				for stop_id, ts_arr, ts_dep in trip_stops:
-					print(f'{pre}      {stop_id} {ts_arr or "-":^3s} {ts_dep or "-":^3s}')
+				for stop_id, ts_arr, ts_dep, pickup, dropoff in trip_stops:
+					p, d = embark_format('pickup', pickup, 'P'), embark_format('dropoff', dropoff, 'D')
+					print(f'{pre}      {stop_id} {ts_arr or "-":^3s} {ts_dep or "-":^3s} {p}{d}')
 
 
 	def print_stop_info(self, crs, db_cif):
