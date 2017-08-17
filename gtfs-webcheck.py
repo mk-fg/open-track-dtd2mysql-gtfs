@@ -1164,7 +1164,7 @@ class GWCTestRunner:
 		progress = progress_iter(self.log, 'trips', trip_count - len(self.trip_skip or list()))
 
 		async for t, stops in trips:
-			next(progress)
+			if not self.conf.test_pick_trip_random_order: next(progress)
 			ts = dt.datetime.now()
 			date_current, time_current = ts.date(), ts.time()
 			trip_id, train_uid, service_id = t.trip_id, t.trip_headsign, t.service_id
