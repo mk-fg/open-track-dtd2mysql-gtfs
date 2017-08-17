@@ -850,7 +850,7 @@ class GWCAPISerw:
 
 			if jns is None:
 				# Slower query, picking valid stops first, then looking for journeys again
-				ends = dict.fromkeys(['src', 'dst'])
+				(src0, dst0), ends = (src, dst), dict.fromkeys(['src', 'dst'])
 				stops = list(enumerate(map(op.attrgetter('crs'), trip.stops)))
 				n_chk, stops = -1, dict(src=iter(stops), dst=iter(reversed(stops)))
 				while not all(ends.values()):
@@ -866,8 +866,9 @@ class GWCAPISerw:
 					else: continue
 					raise GWCTestSkipTrip(self.api_tag, 'trip has no api-valid stops')
 				(src, src_nlc), (dst, dst_nlc) = ends['src'], ends['dst']
-				self.log.warning( 'Limiting check to [{} {}]'
-					' segment due to api limitations for trip: {}', src, dst, trip )
+				if (src, dst) != (src0, dst0):
+					self.log.warning( 'Limiting check to [{} {}]'
+						' segment due to api limitations for trip: {}', src, dst, trip )
 				jns = await self.get_journeys(src_nlc, dst_nlc, ts_dep=(trip.ts_start, trip.ts_end))
 
 		if jns is None: raise GWCTestSkipTrip(self.api_tag, 'api lookup fails')
