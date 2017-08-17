@@ -291,6 +291,11 @@ def iter_range(a, b, step):
 		if v == b: break
 		v += step
 
+def filter_weights_dict(weights=None, **fallback):
+	weights = dict((k,v) for k,v in (weights or fallback or dict()).items() if v > 0)
+	if not weights: raise ValueError(weights, fallback)
+	return weights
+
 def random_weight(items, keys_subset=None):
 	if isinstance(items, dict): items = items.items()
 	keys = set(keys_subset or set())
@@ -1039,7 +1044,7 @@ class GWCTestRunner:
 
 
 	async def _pick_trips(self, weights=None, pick_uids=None):
-		weights = weights or self.conf.test_pick_trip or dict(seq=1)
+		weights = filter_weights_dict(weights or self.conf.test_pick_trip, seq=1)
 		pick_trip_order = 'RAND()' if self.conf.test_pick_trip_random_order else 'trip_id'
 
 		trip_id_skip = ( '1' if not self.trip_skip else
@@ -1110,7 +1115,8 @@ class GWCTestRunner:
 	def pick_dates(self, dates, weights=None, current=None):
 		'Pick dates to test according to weights in conf.test_pick_date.'
 		if not current: current = dt.date.today()
-		dates, weights = list(dates), weights or self.conf.test_pick_date or dict(seq=1)
+		weights = filter_weights_dict(weights or self.conf.test_pick_date, seq=1)
+		dates = list(dates)
 		if not dates: return dates
 		dates_pick, week_pos = list(), bisect.bisect_left(dates, current + dt.timedelta(7))
 		pick_seq = dict(
