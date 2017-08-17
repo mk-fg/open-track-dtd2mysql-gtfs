@@ -2,14 +2,7 @@
 ### All settings here are optional, with defaults hardcoded in the script.
 ### Options specified on the command line override values here.
 
-## test_match: how to select API to match gtfs data (e.g. trip) against.
-##  all - query all APIs for match
-##  any - query one API at random
-##  first - query APIs until match is found
-# test_match: any
-# test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
-
-## test_pick_*: weights for picking which trips/days to test first.
+## test_pick_{trip,date}: weights for picking which trips/days to test first.
 ## NOTE: "seq" iterator in test_pick_trip excludes associations and z-trains!
 # test_pick_trip: {seq: 1, assoc: 0.3, z: 0}
 # test_pick_date: {

@@ -14,13 +14,6 @@ import aiomysql # http://aiomysql.readthedocs.io
 
 class TestConfig:
 
-	## test_match: how to select API to match gtfs data (e.g. trip) against.
-	##  all - query all APIs for match
-	##  any - query one API at random
-	##  first - query APIs until match is found
-	test_match = enum.Enum('TestMatch', 'all any first').any
-	test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
-
 	## test_pick_{trip,date}: weights for picking which trips/days to test first.
 	## NOTE: "seq" iterator in test_pick_trip excludes associations and z-trains!
 	test_pick_trip = dict(seq=1, assoc=0.3, z=0)
@@ -48,6 +41,14 @@ class TestConfig:
 	test_trip_embark_delay = dt.timedelta(seconds=20*60) # departure time offset for queries
 	test_trip_journeys = 6 # api result count, should be high enough for direct trip to be there
 	test_trip_time_slack = 0 # max diff in stop times to ignore
+
+	## test_match: how to select API to match gtfs data (e.g. trip) against.
+	## NOT USED - checks with only one API are implemented, no point tweaking these.
+	##  all - query all APIs for match
+	##  any - query one API at random
+	##  first - query APIs until match is found
+	test_match = enum.Enum('TestMatch', 'all any first').any
+	test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
 
 	trip_diff_cmd = 'diff -y' # for pretty-printing diffs between trip stops
 	date_max_future_offset = 80 # don't pick future dates further than that
