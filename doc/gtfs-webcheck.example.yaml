@@ -10,8 +10,8 @@
 # test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
 
 ## test_pick_*: weights for picking which trips/days to test first.
-## "seq" in all of these is a simple sequential pick.
-# test_pick_trip: {seq: 1, assoc: 0.5, z: 0.2}
+## NOTE: "seq" iterator in test_pick_trip excludes associations and z-trains!
+# test_pick_trip: {seq: 1, assoc: 0.3, z: 0}
 # test_pick_date: {
 #   seq: 0, seq_next_week: 1e-5, # to avoid dates that are likely to change
 #   seq_after_next_week: 1, bank_holiday: 2, random: 2 }

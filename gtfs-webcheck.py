@@ -22,8 +22,8 @@ class TestConfig:
 	test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
 
 	## test_pick_{trip,date}: weights for picking which trips/days to test first.
-	## "seq" in all of these is a simple sequential pick.
-	test_pick_trip = dict(seq=1, assoc=0.5, z=0.2)
+	## NOTE: "seq" iterator in test_pick_trip excludes associations and z-trains!
+	test_pick_trip = dict(seq=1, assoc=0.3, z=0)
 	test_pick_date = dict(
 		seq=0, seq_next_week=1e-5, # to avoid dates that are likely to change
 		seq_after_next_week=1, bank_holiday=2, random=2 )
@@ -1043,7 +1043,8 @@ class GWCTestRunner:
 
 		trip_id_skip = ( '1' if not self.trip_skip else
 			f'trip_id NOT IN ({",".join(map(self.escape, self.trip_skip))})' )
-		pick_checks = dict( seq='1',
+		pick_checks = dict(
+			seq=r"trip_headsign REGEXP '[^Z][^_]+'",
 			assoc=r"trip_headsign LIKE '%%\_%%'",
 			z="trip_headsign LIKE 'Z%%'" )
 		if set(weights).difference(pick_checks): raise ValueError(weights)
