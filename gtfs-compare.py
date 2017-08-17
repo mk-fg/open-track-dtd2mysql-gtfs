@@ -564,6 +564,7 @@ class GTFSDB:
 		if db_cif and train_uid:
 			train_assoc = train_uid.split('_')
 			train_assoc, train_uid_tuple = len(train_assoc) > 1, ','.join(map(self.escape, train_assoc))
+			z = 'z_' if train_uid.startswith('Z') else ''
 
 			print(f'{pre}cif train/sched info{cif_comment}:')
 			values = collections.defaultdict(lambda: collections.defaultdict(list))
@@ -574,7 +575,7 @@ class GTFSDB:
 						profit_center, business_sector, power_type, timing_load, speed,
 						operating_chars, train_class, sleepers, reservations, connect_indicator,
 						catering_code, service_branding
-					FROM {db_cif}.schedule s
+					FROM {db_cif}.{z}schedule s
 					WHERE train_uid IN ({train_uid_tuple})
 					ORDER BY train_uid'''), op.attrgetter('train_uid')):
 				for s in schedules:
@@ -612,7 +613,7 @@ class GTFSDB:
 					runs_from AS a , runs_to AS b, bank_holiday_running AS always,
 					CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
 					-- , crs_code, public_arrival_time AS ts_arr, public_departure_time AS ts_dep
-				FROM {db_cif}.schedule s
+				FROM {db_cif}.{z}schedule s
 				-- LEFT JOIN {db_cif}.stop_time st ON st.schedule = s.id
 				-- LEFT JOIN {db_cif}.tiploc t ON t.tiploc_code = st.location
 				WHERE
