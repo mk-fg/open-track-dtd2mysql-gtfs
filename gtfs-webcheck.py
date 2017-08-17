@@ -263,7 +263,7 @@ def progress_iter(log, prefix, n_max, steps=30, n=0):
 	steps, ts_start = min(n_max, steps), time.time()
 	step_n = steps and n_max / steps
 	msg_tpl = ( '[{{}}] Step {{:>{0}.0f}}'
-		' / {{:{0}d}} {{:02,.0f}}.{{:02,.0f}}s{{}}' ).format(len(str(steps)))
+		' / {{:{0}d}} {{:02,.0f}}+{{:02,.0f}}s{{}}' ).format(len(str(steps)))
 	def _progress_iter_coro(n):
 		while True:
 			dn_msg = yield
@@ -1160,7 +1160,7 @@ class GWCTestRunner:
 		self.stats['trip-count'] = trip_count
 		trip_count_skip = '' if not self.trip_skip else f' ({len(self.trip_skip)} in skip-list)'
 		self.log.debug('Checking {} trip(s){}...', trip_count, trip_count_skip)
-		progress = progress_iter(self.log, 'trips', trip_count)
+		progress = progress_iter(self.log, 'trips', trip_count - len(self.trip_skip or list()))
 
 		async for t, stops in trips:
 			next(progress)
