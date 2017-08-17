@@ -15,11 +15,14 @@
 # test_pick_date: {
 #   seq: 0, seq_next_week: 1e-5, # to avoid dates that are likely to change
 #   seq_after_next_week: 1, bank_holiday: 2, random: 2 }
-# test_pick_date_set: [2017-09-25] # only pick dates from the set
 
 ## test_pick_special: use named iterator func for special trip/date selection.
 ##   holidays - pick from bank_holidays list (can also be read from cli-specified file)
 # test_pick_special: holidays
+
+## Misc picking options
+# test_pick_date_set: [2017-09-25] # only pick dates from the set
+# test_pick_trip_random_order: true # randomize order of checked trips
 
 ## test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
 # test_train_uids: 50

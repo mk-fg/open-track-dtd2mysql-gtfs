@@ -21,18 +21,21 @@ class TestConfig:
 	test_match = enum.Enum('TestMatch', 'all any first').any
 	test_match_parallel = 1 # number of APIs to query in parallel, only for test_match=all/first
 
-	## test_pick_*: weights for picking which trips/days to test first.
+	## test_pick_{trip,date}: weights for picking which trips/days to test first.
 	## "seq" in all of these is a simple sequential pick.
 	test_pick_trip = dict(seq=1, assoc=0.5, z=0.2)
 	test_pick_date = dict(
 		seq=0, seq_next_week=1e-5, # to avoid dates that are likely to change
 		seq_after_next_week=1, bank_holiday=2, random=2 )
-	test_pick_date_set = None # only pick dates from the set
 
 	## test_pick_special: use named iterator func for special trip/date selection.
 	##   holidays - pick from bank_holidays list (can also be read from cli-specified file)
 	test_pick_special = None
 	test_pick_special_iters = {'bank-holidays-only': 'holidays'}
+
+	## Misc picking options
+	test_pick_date_set = None # only pick dates from the set
+	test_pick_trip_random_order = True # randomize order of checked trips
 
 	## test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
 	test_train_uids = None
@@ -1035,6 +1038,7 @@ class GWCTestRunner:
 
 	async def _pick_trips(self, weights=None, pick_uids=None):
 		weights = weights or self.conf.test_pick_trip or dict(seq=1)
+		pick_trip_order = 'RAND()' if self.conf.test_pick_trip_random_order else 'trip_id'
 
 		trip_id_skip = ( '1' if not self.trip_skip else
 			f'trip_id NOT IN ({",".join(map(self.escape, self.trip_skip))})' )
@@ -1051,7 +1055,7 @@ class GWCTestRunner:
 				train_uid_set = set(await self.qb(f'''
 					SELECT trip_headsign FROM trips
 					WHERE {c} GROUP BY trip_headsign
-					ORDER BY RAND() LIMIT {pick_uids}''', flat=True ))
+					ORDER BY {pick_trip_order} LIMIT {pick_uids}''', flat=True))
 				train_uid_checks[k] = train_uid_set
 			train_uid_set, n = set(), sum(map(len, train_uid_checks.values()))
 			while len(train_uid_set) < pick_uids and n > 0:
@@ -1074,7 +1078,7 @@ class GWCTestRunner:
 
 		q_base = f'''
 			SELECT %s AS t, t.* FROM trips t WHERE {{c}} AND
-			{trip_id_skip} AND {train_uid_check} ORDER BY t.trip_id'''
+			{trip_id_skip} AND {train_uid_check} ORDER BY {pick_trip_order}'''
 		trip_iters = dict(
 			(k, self.q(q_base.format(c=c), k, c=f'trips_{k}'))
 			for k,c in pick_checks.items() )
@@ -1153,7 +1157,8 @@ class GWCTestRunner:
 		trip_count = await anext(trips)
 
 		self.stats['trip-count'] = trip_count
-		self.log.debug('Checking {} trip(s)...', trip_count)
+		trip_count_skip = '' if not self.trip_skip else f' ({len(self.trip_skip)} in skip-list)'
+		self.log.debug('Checking {} trip(s){}...', trip_count, trip_count_skip)
 		progress = progress_iter(self.log, 'trips', trip_count)
 
 		async for t, stops in trips:
