@@ -937,6 +937,7 @@ class GWCTestRunner:
 				'Using trip_id skip-list ({} item[s]) from: {}',
 				len(self.trip_skip), self.trip_log.name )
 
+		self.log.debug('Connecting to mysql...') # reminder in case it hangs due to network
 		self.db_conns, self.db_cursors = dict(), dict()
 		self.db_pool = await self.ctx.enter(
 			aiomysql.create_pool(charset='utf8mb4', **(self.conf.mysql_conn_opts or dict())) )
@@ -1214,11 +1215,14 @@ class GWCTestRunner:
 			self.stats['trip-check'] += 1
 			trip_diffs, trip_skip, api_list = list(), False, list(self.api_list)
 			for date in dates:
-				log_trip.debug('checking date: {}', date)
+				log_trip.debug('[{}] checking date...', date)
 				ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
 				self.stats['trip-check-date'] += 1
-				try: await self.check_trip(trip, api_list, ts_start=ts_src)
+				try:
+					await self.check_trip(trip, api_list, ts_start=ts_src)
+					log_trip.debug('[{}] result: match', date)
 				except GWCTestBatchFail as err_batch:
+					trip_date_diffs = list()
 					for err in err_batch.exc_list:
 						err_type = err_cls(err)
 
@@ -1244,7 +1248,7 @@ class GWCTestRunner:
 
 						else: err_api = err.api
 
-						trip_diffs.append(f'{err_api}.{err_type}')
+						trip_date_diffs.append(f'{err_api}.{err_type}')
 						self.stats[f'diff-api-{err_api}'] += 1
 						self.stats[f'diff-type-{err_type}'] += 1
 						if err:
@@ -1257,6 +1261,9 @@ class GWCTestRunner:
 									err.diff or pformat_data(err.data), '  ' ).splitlines())
 							log_lines(self.log_diffs.error, err_info)
 
+					trip_diffs.extend(trip_date_diffs)
+					log_trip.debug( '[{}] result: {}', date,
+						', '.join(trip_date_diffs) if trip_date_diffs else f'skip (trip={trip_skip})' )
 				if trip_skip: break
 			self.stats['diff-total'] += len(trip_diffs)
 
