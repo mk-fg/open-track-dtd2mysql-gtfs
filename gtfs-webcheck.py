@@ -487,7 +487,7 @@ class GWCTripStop:
 
 class GWCTrip:
 
-	TripSig = collections.namedtuple('TripSig', 'src dst train_uid_list ts_src')
+	TripSig = collections.namedtuple('TripSig', 'src dst train_uid train_uid_list ts_src')
 
 	@classmethod
 	def from_serw_cps(cls, sig, stops, links):
@@ -513,8 +513,10 @@ class GWCTrip:
 			src = trip_stops.append(GWCTripStop(
 				crs, ts, pickup, dropoff, name=name, nlc=nlc, lat=lat, lon=lon ))
 			if dst == crs: break
-		train_uid = ( sig.train_uid_list[0] if len(sig.train_uid_list) == 1
-			else '{}_{}'.format(sig.train_uid_list[0], sig.train_uid_list[-1]) )
+		if sig.train_uid_list[0] == sig.train_uid_list[-1]:
+			train_uid = sig.train_uid_list[0]
+			if sig.train_uid: assert train_uid == sig.train_uid, [train_uid, sig.train_uid]
+		else: train_uid = '{}_{}'.format(sig.train_uid_list[0], sig.train_uid_list[-1])
 		return cls(train_uid, trip_stops, sig.ts_src, sig_train_uid_list=sig.train_uid_list)
 
 	@classmethod
@@ -591,13 +593,15 @@ class GWCJnSig:
 			parse_time, (jn_info[k] for k in ['origin', 'destination']) )
 		trips = list()
 		for trip in jn_info['legs']:
+			try: train_uid = trip['serviceDetails']['trainUid'] # only base_uid for associations!
+			except KeyError: continue # mode=Metro and such
 			src, dst = (trip[k] for k in ['origin', 'destination'])
 			assert len(src) == len(dst) == 1, [src, dst] # not sure why it's a list for legs
 			src, dst = map(op.itemgetter(0), [src, dst])
 			ts_src, ts_dst = map(parse_time, [src, dst])
 			src, dst = (links[v['station']]['crs'] for v in [src, dst])
 			trips.append(cls.JnSigTrip(
-				src, ts_src, dst, ts_dst, trip['serviceDetails']['trainUid'] ))
+				src, ts_src, dst, ts_dst, train_uid ))
 		return cls(trips, ts_start, ts_end)
 
 	def __init__(self, trips, ts_start, ts_end):
@@ -647,7 +651,7 @@ class GWCJn:
 				train_uid_list.append(assoc_uid)
 			src, dst = (cps['links'][f'/data/stations/{s}']['crs'] for s in [src, dst])
 			sig_n, jst = jn_sig.trip_index(src, dst)
-			sig = GWCTrip.TripSig(src, dst, train_uid_list, jst.ts_src)
+			sig = GWCTrip.TripSig(src, dst, jst.train_uid, train_uid_list, jst.ts_src)
 			trip_order.append((sig_n, sig_key, sig))
 		trip_order.sort()
 
@@ -915,6 +919,8 @@ class GWCAPISerw:
 				continue
 			break
 		else: raise GWCTestFailNoJourney(self.api_tag, trip, jns)
+		if trip.train_uid not in jns_dict:
+			self.log.debug('Matched assoc train_uid ({}) by component: {}', trip.train_uid, train_uid)
 
 		## Match all stops/stop-times
 		# SERW API returns non-public stops (often duplicated), which are missing in gtfs
