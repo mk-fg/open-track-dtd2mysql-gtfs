@@ -699,7 +699,7 @@ class GWCAPISerw:
 					('Failed to get diff output for trips: [{}] {}', err_cls(err), err),
 					('cmd: {}', cmd), ('  trip-gtfs: {}', gtfs_trip), ('  trip-api: {}', jn_trip) ])
 				return
-			return f'Matching journey trip [{dst2.name}]:\n  {jn_trip}\n{res.stdout.decode()}'
+			return f'Matching journey trip [ gtfs -vs- api ]:\n  {jn_trip}\n{res.stdout.decode()}'
 
 
 	def _api_cache(self, fn_tpl=None, data=..., fn=None):
@@ -712,18 +712,19 @@ class GWCAPISerw:
 
 	def _api_error_check(self, http_status, data):
 		if isinstance(data, dict) and data.get('errors'):
-			err = data['errors']
-			try:
-				err, = err
-				err = err.get('failureType'), err['errorCode']
-			except: raise GWCAPIError(http_status, err)
-			if err not in self.conf.serw_error_skip:
-				err_type, err_code = err
-				for chk_type, chk_code in self.conf.serw_error_skip or list():
-					if chk_type != err_type: continue
-					if chk_code == err_code: break
-					if isinstance(chk_code, re_type) and chk_code.search(err_code): break
-				else: raise GWCAPIErrorCode(http_status, *err)
+			err_list = data.get('errors') or list()
+			for err in err_list:
+				try: err = err.get('failureType'), err['errorCode']
+				except: break
+				if err not in self.conf.serw_error_skip:
+					err_type, err_code = err
+					for chk_type, chk_code in self.conf.serw_error_skip or list():
+						if chk_type != err_type: continue
+						if chk_code == err_code: break
+						if isinstance(chk_code, re_type) and chk_code.search(err_code): break
+					else: break
+			else: err_list = None # all errors were skipped
+			if err_list: raise GWCAPIError(http_status, err_list)
 		elif data and isinstance(data, dict) and 'result' not in data:
 			raise GWCAPIError(http_status, f'no "result" key in data - {data!r}')
 		if http_status != 200:
