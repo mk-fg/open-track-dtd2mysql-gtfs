@@ -739,9 +739,8 @@ class DTDtoGTFS:
 
 		for sched_count, qt in zip(sched_counts, q_tweaks):
 			self.log.debug(
-				'Fetching cif.{}schedule entries (count={:,}{})...',
-				qt['z'], sched_count, test_run_slice_repr,
-				z_slice=(f'{qt["z_slice"]}/' if qt['z_slice'] else '') )
+				'Fetching cif.{}schedule entries (count={:,}{})...', qt['z'], sched_count,
+				test_run_slice_repr.format(z_slice=(f'{qt["z_slice"]}/' if qt['z_slice'] else '')) )
 			yield from self.q(q_sched.format(**qt))
 
 	def get_schedules(self, test_run_slice):
@@ -821,7 +820,6 @@ class DTDtoGTFS:
 		'''Build a map for association graphs, where for every train_uid
 				that has any association info, list of corresponding association sets can be found.
 			When all Schedules for train_uids in AssocSet.assoc_map are gathered, it can be processed.'''
-		# XXX: look more closely into how same-day multi-base assoc records work
 		self.log.debug('Constructing train association map...')
 
 		### First associations are parsed and indexed by base_train_uid,
@@ -859,14 +857,6 @@ class DTDtoGTFS:
 			for assoc in filter(None, trains_assoc):
 				for n, train_uid in enumerate([assoc.base, assoc.assoc]):
 					assoc_map[train_uid][n].append(assoc)
-
-		# Sanity check: make sure train_uid doesn't appear
-		#  in both base_uid and assoc_uid on the same days.
-		# Handling such cases would require more complex logic
-		for train_uid, (assocs_base, assocs) in assoc_map.items():
-			if not (assocs_base and assocs): continue
-			for assoc1, assoc2 in it.product(assocs_base, assocs):
-				assert not assoc1.cal.intersection(assoc2.cal), [train_uid, assoc1, assoc2]
 
 		return assoc_map
 
@@ -913,8 +903,22 @@ class DTDtoGTFS:
 			scheds_base = list_chain(sched_idx_base[assoc] for assoc in assocs)
 			if not scheds_base: continue
 			raise CIFError(
-				'Multiple associations for same train_uid on the same days',
+				'Multiple associations for same train_uid on the same day(s)',
 				assocs[0].assoc, assocs, list(map(str, assoc_days)), scheds_base )
+
+		# Sanity check 2: make sure train_uid doesn't appear in both base_uid and
+		#  assoc_uid on the same days, except when one of these trains have no schedules.
+		# Handling such cases would require more complex logic
+		for train_uid, (assocs_base, assocs) in assoc_map.items():
+			if not (assocs_base and assocs): continue
+			for assoc1, assoc2 in it.product(assocs_base, assocs):
+				multi_assoc_days = assoc1.cal.intersection(assoc2.cal)
+				if not multi_assoc_days: continue
+				sched_base, sched_assoc = sched_idx_base[assoc1], sched_idx_assoc[assoc2]
+				if not sched_base or not sched_assoc: continue
+				raise CIFError(
+					'Multiple associations for same train_uid on the same day(s)',
+					train_uid, assoc1, assoc2, multi_assoc_days )
 
 		self.log.debug(
 			'Applying {:,} association info(s) (splits/joins) to {:,} schedule(s)...',
