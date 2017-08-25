@@ -41,6 +41,7 @@ class TestConfig:
 	test_trip_embark_delay = dt.timedelta(seconds=20*60) # departure time offset for queries
 	test_trip_journeys = 6 # api result count, should be high enough for direct trip to be there
 	test_trip_time_slack = 0 # max diff in stop times to ignore
+	test_skip_stops = None # 2-int tuple of start/end stops to skip when checking, for debugging
 
 	## test_match: how to select API to match gtfs data (e.g. trip) against.
 	## NOT USED - checks with only one API are implemented, no point tweaking these.
@@ -1189,6 +1190,9 @@ class GWCTestRunner:
 					if s.drop_off_type == GTFSEmbarkType.none: continue
 					test_stops.extend(buff)
 					buff.clear()
+			if self.conf.test_skip_stops:
+				n, m = self.conf.test_skip_stops
+				test_stops = test_stops[n:-m if m else 9999]
 			if len(test_stops) >= 2 and test_stops[0].stop_id == test_stops[-1].stop_id:
 				test_stops = test_stops[:-1] # to avoid OriginDestinationSame error
 			if len(test_stops) < 2:
@@ -1383,7 +1387,11 @@ def main(args=None, conf=None):
 			' Supported types correspond to implemented GWCTestFail'
 				' exceptions, e.g.: NoJourney, StopNotFound, StopMismatch.'
 			' Multiple values can be specified in one space-separated arg.')
-	group.add_argument('--debug-rng-seed', help='Random number generator seed.')
+	group.add_argument('--debug-skip-stops', metavar='N[-M]',
+		help='When checking trip, skip some number (N[-M] format) of first/last stops.'
+			' Can be used in combination with -u/-t to check if some segment of trip can be matched.')
+	group.add_argument('--debug-rng-seed',
+		metavar='any-string', help='Random number generator seed.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -1467,6 +1475,10 @@ def main(args=None, conf=None):
 		conf.debug_cache_dir.mkdir(parents=True, exist_ok=True)
 	if opts.debug_trigger_mismatch: conf.debug_trigger_mismatch = opts.debug_trigger_mismatch
 	if opts.debug_rng_seed: random.seed(opts.debug_rng_seed)
+	if opts.debug_skip_stops:
+		nm = list(map(int, opts.debug_skip_stops.split('-', 1)))
+		if len(nm) == 1: nm.append(0)
+		conf.test_skip_stops = tuple(nm)
 
 	log.debug('Starting run_tests loop...')
 	with contextlib.closing(asyncio.get_event_loop()) as loop:
