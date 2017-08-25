@@ -96,6 +96,7 @@ class TestConfig:
 		for k,v in conf.items():
 			if k == 'test_match': v = self.test_match[v]
 			if k == 'test_trip_embark_delay': v = dt.timedelta(seconds=v)
+			if re.search(r'^debug_\S+_dir$', k): v = pathlib.Path(v)
 			setattr(self, k, v)
 
 
