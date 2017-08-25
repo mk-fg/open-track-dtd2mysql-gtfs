@@ -557,21 +557,25 @@ class GWCTrip:
 
 class GWCJnSig:
 
-	JnSigTrip = collections.namedtuple('JnSigTrip', 'src ts_src dst ts_dst')
+	JnSigTrip = collections.namedtuple(
+		'JnSigTrip', 'src ts_src dst ts_dst train_uid' )
 
 	@classmethod
 	def from_serw_url(cls, jn_sig_str):
+		parse_times = (
+			dt.datetime.strptime(f'{d}-{t}', '%y%m%d-%H%M')
+			for d,t in (popn(jn_sig, 2) for n in range(2)) )
 		jn_sig = collections.deque(reversed(jn_sig_str.split('|')))
-		ts_start, ts_end = cls._parse_times(jn_sig)
+		ts_start, ts_end = parse_times(jn_sig)
 		trips, ts0 = list(), ts_start
 		while jn_sig:
 			t = jn_sig.pop().lower()
 			if t == 'trip':
 				src, dst = popn(jn_sig, 2)
-				ts_src, ts_dst = cls._parse_times(jn_sig)
+				ts_src, ts_dst = parse_times(jn_sig)
 				assert ts_src >= ts0, [ts0, ts_src]
 				rsid, rsid_prefix = popn(jn_sig, 2)
-				trips.append(cls.JnSigTrip(src, ts_src, dst, ts_dst))
+				trips.append(cls.JnSigTrip(src, ts_src, dst, ts_dst, None))
 				ts0 = ts_dst
 			elif t == 'transfer':
 				src, dst, delta, tt = popn(jn_sig, 4)
@@ -580,26 +584,40 @@ class GWCJnSig:
 		return cls(trips, ts_start, ts_end)
 
 	@classmethod
-	def _parse_times(cls, jn_sig):
-		ts1, ts2 = (
-			dt.datetime.strptime(f'{d}-{t}', '%y%m%d-%H%M')
-			for d,t in (popn(jn_sig, 2) for n in range(2)) )
-		return ts1, ts2
+	def from_serw_info(cls, jn_info, links):
+		parse_time = lambda stop: dt.datetime.strptime(
+			stop['time']['scheduledTime'], '%Y-%m-%dT%H:%M:%S' )
+		ts_start, ts_end = map(
+			parse_time, (jn_info[k] for k in ['origin', 'destination']) )
+		trips = list()
+		for trip in jn_info['legs']:
+			src, dst = (trip[k] for k in ['origin', 'destination'])
+			assert len(src) == len(dst) == 1, [src, dst] # not sure why it's a list for legs
+			src, dst = map(op.itemgetter(0), [src, dst])
+			ts_src, ts_dst = map(parse_time, [src, dst])
+			src, dst = (links[v['station']]['crs'] for v in [src, dst])
+			trips.append(cls.JnSigTrip(
+				src, ts_src, dst, ts_dst, trip['serviceDetails']['trainUid'] ))
+		return cls(trips, ts_start, ts_end)
 
 	def __init__(self, trips, ts_start, ts_end):
 		self.trips, self.ts_start, self.ts_end = trips, ts_start, ts_end
 
 	def __repr__(self):
-		stops = list()
+		stops, trains = list(), list()
 		for jst in self.trips:
-			src, ts_src, dst, ts_dst = jst
+			src, ts_src, dst, ts_dst, train_uid = jst
 			ts_src, ts_dst = (ts.strftime('%H:%M') for ts in [ts_src, ts_dst])
-			if not stops or src != stops[-1][0]: stops.append([src, ts_src])
+			if not stops or src != stops[-1][0]: stops.append([src, ts_src, train_uid])
 			elif stops[-1][1] != ts_src: stops[-1][1] += f'/{ts_src}'
-			stops.append([dst, ts_dst])
-		stops = ' - '.join(f'{crs}[{ts}]' for crs, ts in stops)
+			stops.append([dst, ts_dst, train_uid])
+			trains.append(train_uid)
+		stops_trains = len(set(trains)) > 1
 		span = ' '.join(ts.strftime('%H:%M') for ts in [self.ts_start, self.ts_end])
-		return f'<JnSig [{span}] [{stops}]>'
+		trains = '/'.join(map(op.itemgetter(0), it.groupby(trains)))
+		stops = ' - '.join(
+			f'{crs}[{f"{train_uid}." if stops_trains else ""}{ts}]' for crs, ts, train_uid in stops )
+		return f'<JnSig [{span}] {trains} ({stops})>'
 
 	def trip_index(self, src, dst):
 		for n, t in enumerate(self.trips):
@@ -826,15 +844,17 @@ class GWCAPISerw:
 					openReturn=False, disableGroupSavings=True, showCheapest=False, doRealTime=False ) )
 		except GWCAPIErrorEmpty: return None
 
-		jp_urls = list(
-			urllib.parse.unquote_plus(res['journey'])
-			for res in jp_res['result']['outward'] )
-
 		journeys = list()
-		for jp_url in jp_urls:
-			jn_sig = GWCJnSig.from_serw_url(jp_url.rsplit('/', 1)[-1])
-			cps = await self.api_call('get', f'{jp_url}/calling-points')
+		for res in jp_res['result']['outward']:
+			jn_sig_str = res['journey']
+			jn_info = jp_res['links'][jn_sig_str]
+			assert jn_info['status'] == 'successful'
+			cps = await self.api_call('get', jn_info['callingPoints'])
+			jn_sig = GWCJnSig.from_serw_info(jn_info, jp_res['links'])
+			# jn_sig = GWCJnSig.from_serw_url(
+			# 	urllib.parse.unquote_plus(jn_sig_str).rsplit('/', 1)[-1] )
 			journeys.append(GWCJn.from_serw_cps(jn_sig, cps))
+
 		return journeys
 
 
