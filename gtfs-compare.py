@@ -606,19 +606,20 @@ class GTFSDB:
 					sched_info = ' ({})'.format(', '.join(sorted(sched_info))) if sched_info else ''
 					if v is not None: print(f'{pre}  {k}: {v}{sched_info}')
 
-			print(f'{pre}cif schedules{"/stops" if cif_stops else ""}{cif_comment}:')
+			print(f'{pre}cif {z}schedules{"/stops" if cif_stops else ""}{cif_comment}:')
 			sched_query = f'''
 				SELECT
 					s.train_uid, s.id, stp_indicator AS stp,
 					runs_from AS a , runs_to AS b, bank_holiday_running AS always,
 					CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
-					-- , crs_code, public_arrival_time AS ts_arr, public_departure_time AS ts_dep
+					{'-- , crs_code' if not z else ', location AS crs_code'}
+					-- , public_arrival_time AS ts_arr, public_departure_time AS ts_dep
 				FROM {db_cif}.{z}schedule s
-				-- LEFT JOIN {db_cif}.stop_time st ON st.schedule = s.id
-				-- LEFT JOIN {db_cif}.tiploc t ON t.tiploc_code = st.location
+				-- LEFT JOIN {db_cif}.{z}stop_time st ON st.{z}schedule = s.id
+				{f'-- LEFT JOIN {db_cif}.tiploc t ON t.tiploc_code = st.location' if not z else ''}
 				WHERE
 					train_uid IN ({train_uid_tuple})
-					-- AND (st.id IS NULL OR t.crs_code IS NOT NULL)
+					{'-- AND (st.id IS NULL OR t.crs_code IS NOT NULL)' if not z else ''}
 				ORDER BY
 					s.train_uid, -- FIELD(stp_indicator,'P','O','N','C'),
 					s.id -- , st.id'''
