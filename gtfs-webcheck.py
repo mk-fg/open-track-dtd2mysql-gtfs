@@ -38,7 +38,7 @@ class TestConfig:
 
 	# XXX: negative tests - specifically pick bank holidays and exception days
 	test_trip_dates = 3 # how many dates to pick and test per trip (using test_pick_date weights)
-	test_trip_embark_delay = dt.timedelta(seconds=20*60) # departure time offset for queries
+	test_trip_embark_delay = dt.timedelta(seconds=5*60) # departure time offset for queries
 	test_trip_journeys = 6 # api result count, should be high enough for direct trip to be there
 	test_trip_time_slack = 0 # max diff in stop times to ignore
 	test_skip_stops = None # 2-int tuple of start/end stops to skip when checking, for debugging
