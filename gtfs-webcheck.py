@@ -89,6 +89,7 @@ class TestConfig:
 	def __init__(self, path=None):
 		if path: self._update_from_file(path)
 		self._debug_files = collections.Counter()
+		if not self.serw_crs_nlc_map: self.serw_crs_nlc_map = dict()
 
 	def _update_from_file(self, path):
 		import yaml # http://pyyaml.org/
@@ -816,9 +817,14 @@ class GWCAPISerw:
 				try: st_loc = res['links'][st_info['station']]
 				except KeyError: continue
 				nlc, crs = map(str, [st_loc['nlc'], st_loc['crs']])
-				if code_raw in [crs, nlc] or code in [crs, nlc]: return nlc
-		elif code and len(code) == 4: return code
-		raise GWCError(f'Falied to process station code to 4-digit nlc: {code_raw!r}')
+				if code_raw in [crs, nlc] or code in [crs, nlc]: break
+			else: nlc = None
+			code = nlc
+		elif code and len(code) != 4: code = None
+		if not code:
+			raise GWCError(f'Falied to process station code to 4-digit nlc: {code_raw!r}')
+		self.conf.serw_crs_nlc_map[code_raw] = code # to cache/update resolved codes
+		return code
 
 	async def get_journeys(self, src, dst, ts_dep=None):
 		'''Query API and return a list of journeys from src to dst,
@@ -1402,7 +1408,9 @@ def main(args=None, conf=None):
 		metavar='file', default='doc/UK-stations-crs-nlc.csv',
 		help='UK crs-to-nlc station code mapping table ("crs,nlc" csv file).'
 			' Either of these codes can be used for data lookups.'
-			' Empty value or "-" will create empty mapping. Default: %(default)s')
+			' Will be resolved via API (caching for runtime)'
+				' if file is missing, or empty/"-" value is specified instead.'
+			' Default: %(default)s')
 
 	group = parser.add_argument_group('Misc dev/debug options')
 	group.add_argument('--debug-cache-dir', metavar='file',
@@ -1447,25 +1455,29 @@ def main(args=None, conf=None):
 		logger.addHandler(handler)
 
 	if opts.serw_crs_nlc_csv and opts.serw_crs_nlc_csv != '-':
-		crs_nlc_map, lines_warn = dict(), list()
-		with open(opts.serw_crs_nlc_csv) as src:
-			for n, line in enumerate(src, 1):
-				try: crs, nlc = line.strip().split(',',1)
-				except ValueError: pass
-				else:
-					if len(crs) == 3 and len(nlc) in [4, 6]:
-						if len(nlc) == 6 and not nlc.endswith('00'): continue
-						crs_nlc_map[crs] = nlc[:4]
-						continue
-				lines_warn.append((n, line))
-			if len(lines_warn) > 20:
-				n, line = lines_warn[0]
-				log.warning( 'Failed to process {} "crs,nlc"'
-					' csv lines, first one: {!r} [{}]', len(lines_warn), line, n )
-			elif lines_warn:
-				for n, line in lines_warn:
-					log.warning('Failed to process "crs,nlc" csv line: {!r} [{}]', line, n)
-		conf.serw_crs_nlc_map = crs_nlc_map
+		p = pathlib.Path(opts.serw_crs_nlc_csv)
+		if not p.exists():
+			log.debug('Missing --serw-crs-nlc-csv list file: {}', p)
+		else:
+			crs_nlc_map, lines_warn = dict(), list()
+			with p.open() as src:
+				for n, line in enumerate(src, 1):
+					try: crs, nlc = line.strip().split(',',1)
+					except ValueError: pass
+					else:
+						if len(crs) == 3 and len(nlc) in [4, 6]:
+							if len(nlc) == 6 and not nlc.endswith('00'): continue
+							crs_nlc_map[crs] = nlc[:4]
+							continue
+					lines_warn.append((n, line))
+				if len(lines_warn) > 20:
+					n, line = lines_warn[0]
+					log.warning( 'Failed to process {} "crs,nlc"'
+						' csv lines, first one: {!r} [{}]', len(lines_warn), line, n )
+				elif lines_warn:
+					for n, line in lines_warn:
+						log.warning('Failed to process "crs,nlc" csv line: {!r} [{}]', line, n)
+			conf.serw_crs_nlc_map = crs_nlc_map
 
 	if opts.bank_holiday_list and opts.bank_holiday_list != '-':
 		conf.bank_holidays = set()
