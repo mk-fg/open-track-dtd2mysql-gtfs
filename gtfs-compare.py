@@ -73,6 +73,8 @@ def iter_range(a, b, step):
 		if v == b: break
 		v += step
 
+it_adjacent = lambda seq, n, fill=None: it.zip_longest(fillvalue=fill, *([iter(seq)] * n))
+
 class adict(dict):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
@@ -613,7 +615,7 @@ class GTFSDB:
 					runs_from AS a , runs_to AS b, bank_holiday_running AS always,
 					CONCAT(monday, tuesday, wednesday, thursday, friday, saturday, sunday) AS days
 					{'-- , crs_code' if not z else ', location AS crs_code'}
-					-- , public_arrival_time AS ts_arr, public_departure_time AS ts_dep
+					-- , public_arrival_time AS ts_arr, public_departure_time AS ts_dep, activity
 				FROM {db_cif}.{z}schedule s
 				-- LEFT JOIN {db_cif}.{z}stop_time st ON st.{z}schedule = s.id
 				{f'-- LEFT JOIN {db_cif}.tiploc t ON t.tiploc_code = st.location' if not z else ''}
@@ -629,14 +631,18 @@ class GTFSDB:
 			for s in self.q(sched_query):
 				days = ''.join(str(n if d else '.') for n,d in zip(range(1, 8), map(int, s.days)))
 				if cif_stops:
+					activity = s.activity or ''
+					if len(activity) % 2: activity += ' '
+					activity = '/'.join(filter( None,
+						(activity[n:n+2].strip() for n in range(0, len(activity), 2)) ))
 					print(
 						f'{pre}  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
 						'A' if s.always else ' ', s.crs_code or '---',
-						dts_format(s.ts_arr), dts_format(s.ts_dep) )
+						dts_format(s.ts_arr), dts_format(s.ts_dep), activity )
 				else:
 					print(
-						f'{pre}  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days}',
-						'no-holidays' if s.always else '' )
+						f'{pre}  {s.train_uid} {s.id:>7d} {s.stp} {s.a} {s.b} {days} ',
+						'[no-holidays]' if s.always else '' )
 
 			assocs = list(self.q(f'''
 				SELECT
