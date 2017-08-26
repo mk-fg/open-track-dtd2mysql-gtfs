@@ -513,7 +513,6 @@ class GWCTrip:
 			pickup, dropoff = (embark_flags_dict.get(v, v) for v in [pickup, dropoff])
 			src = trip_stops.append(GWCTripStop(
 				crs, ts, pickup, dropoff, name=name, nlc=nlc, lat=lat, lon=lon ))
-			if dst == crs: break
 		if sig.train_uid_list[0] == sig.train_uid_list[-1]:
 			train_uid = sig.train_uid_list[0]
 			if sig.train_uid: assert train_uid == sig.train_uid, [train_uid, sig.train_uid]
