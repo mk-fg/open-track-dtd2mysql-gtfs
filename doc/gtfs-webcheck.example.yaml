@@ -24,9 +24,14 @@
 ## test_trip_log: path to file to append tested trip_id's to and skip ones already there.
 # test_trip_log: trips-done.log
 
+# test_trip_embark_delay: initial stop departure time offset(s) for queries.
+# If a list, tried in the same order until direct trip with matching train_uid is found.
+# Single small value can yield no resulst, while too large ones
+#  can make journey planner discard relevant result for too common routes.
+# test_trip_embark_delay: [300, 600, 1800]
+
 ## Misc testing parameters
 # test_trip_dates: 3 # how many dates to pick and test per trip (using test_pick_date weights)
-# test_trip_embark_delay: 1800 # departure time offset for queries from first trip stop time
 # test_trip_journeys: 6 # should be high enough for direct trip to be there
 # test_trip_time_slack: 0 # max diff in stop times to ignore
 # trip_diff_cmd: 'diff -y' # for pretty-printing diffs between trip stops

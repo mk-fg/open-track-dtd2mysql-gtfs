@@ -36,9 +36,15 @@ class TestConfig:
 	## test_trip_log: path to file to append tested trip_id's to and skip ones already there.
 	test_trip_log = None
 
+	# test_trip_embark_delay: initial stop departure time offset(s) for queries, in seconds.
+	# If a list, tried in the same order until direct trip with matching train_uid is found.
+	# Single small value can yield no resulst, while too large ones
+	#  can make journey planner discard relevant result for too common routes.
+	test_trip_embark_delay = 5*60
+	# test_trip_embark_delay = [5*60, 10*60, 30*60]
+
 	# XXX: negative tests - specifically pick bank holidays and exception days
 	test_trip_dates = 3 # how many dates to pick and test per trip (using test_pick_date weights)
-	test_trip_embark_delay = dt.timedelta(seconds=5*60) # departure time offset for queries
 	test_trip_journeys = 6 # api result count, should be high enough for direct trip to be there
 	test_trip_time_slack = 0 # max diff in stop times to ignore
 	test_skip_stops = None # 2-int tuple of start/end stops to skip when checking, for debugging
@@ -89,16 +95,24 @@ class TestConfig:
 	def __init__(self, path=None):
 		if path: self._update_from_file(path)
 		self._debug_files = collections.Counter()
-		if not self.serw_crs_nlc_map: self.serw_crs_nlc_map = dict()
+		self._normalize()
 
 	def _update_from_file(self, path):
 		import yaml # http://pyyaml.org/
 		with path.open() as src: conf = yaml.safe_load(src)
 		for k,v in conf.items():
 			if k == 'test_match': v = self.test_match[v]
-			if k == 'test_trip_embark_delay': v = dt.timedelta(seconds=v)
 			if re.search(r'^debug_\S+_dir$', k): v = pathlib.Path(v)
 			setattr(self, k, v)
+		self._normalize()
+
+	def _normalize(self):
+		if not self.serw_crs_nlc_map: self.serw_crs_nlc_map = dict()
+		if isinstance(self.test_trip_embark_delay, (int, float)):
+			self.test_trip_embark_delay = [self.test_trip_embark_delay]
+		self.test_trip_embark_delay = list(
+			(dt.timedelta(seconds=v) if isinstance(v, (int, float)) else v)
+			for v in self.test_trip_embark_delay )
 
 
 class AsyncExitStack:
@@ -1187,6 +1201,37 @@ class GWCTestRunner:
 		return self.pick_dates(dates, weights=dict(bank_holiday=1))
 
 
+	def _handle_api_test_failure(self, trip, err, log=None):
+		'''Handle/log various special cases
+			of test errors, such as skips and unexpected errors.'''
+		err_diff, skip_api = err_cls(err), None
+		if not log: log = self.log
+
+		if isinstance(err, GWCTestSkipTrip):
+			log.debug('trip-check impossible using api [{}] - {}', err.api, err)
+			self.stats['trip-skip-api'] += 1
+			err_diff, skip_api = None, err.api
+
+		elif isinstance(err, GWCTestSkip):
+			log.debug('check skipped due to api [{}] limitation - {}', err.api, err)
+			self.stats['trip-skip-api-date'] += 1
+			err_diff = None
+
+		elif not isinstance(err, GWCTestFail):
+			try: raise err from None
+			except Exception as err:
+				log_lines(
+					self.log.error, log_func_last=self.log.exception,
+					lines=[ 'Unexpected error during trip check [BUG]',
+						('  trip: {}', trip), ('  error: [{}] {}', err_diff, err) ])
+			err, err_api, err_diff = None, 'core', 'bug'
+
+		else: err_api = err.api # most common case
+
+		if err_diff: err_diff = err, err_api, err_diff
+		return err_diff, skip_api
+
+
 	async def run(self):
 		self.stats = collections.Counter()
 		self.stats['diff-total'] = 0
@@ -1266,62 +1311,52 @@ class GWCTestRunner:
 
 			# Check produced trip info against API(s)
 			self.stats['trip-check'] += 1
-			trip_diffs, trip_skip, api_list = list(), False, list(self.api_list)
+			trip_diffs, api_list = list(), list(self.api_list)
 			for date in dates:
+				if not api_list: break
 				log_trip.debug('[{}] checking date...', date)
-				ts_src = dt.datetime.combine(date, time0) - self.conf.test_trip_embark_delay
 				self.stats['trip-check-date'] += 1
-				try:
-					await self.check_trip(trip, api_list, ts_start=ts_src)
-					log_trip.debug('[{}] result: match', date)
-				except GWCTestBatchFail as err_batch:
-					trip_date_diffs = list()
-					for err in err_batch.exc_list:
-						err_type = err_cls(err)
 
-						if isinstance(err, GWCTestSkipTrip):
-							log_trip.debug('trip-check impossible using api [{}] - {}', err.api, err)
-							self.stats['trip-skip-api'] += 1
-							api_list = list(filter(lambda api: api.api_tag != err.api, api_list))
-							if not api_list: trip_skip = True
-							continue
-						elif isinstance(err, GWCTestSkip):
-							log_trip.debug('check skipped due to api [{}] limitation - {}', err.api, err)
-							self.stats['trip-skip-api-date'] += 1
-							continue # not actually a diff
+				for embark_delay in self.conf.test_trip_embark_delay:
+					if not api_list: break
+					ts_src = dt.datetime.combine(date, time0) - embark_delay
+					try:
+						await self.check_trip(trip, api_list, ts_start=ts_src)
+						log_trip.debug('[{}] result: match', date)
+					except GWCTestBatchFail as err_batch:
+						trip_date_diffs = list()
 
-						elif not isinstance(err, GWCTestFail):
-							try: raise err from None
-							except Exception as err:
-								log_lines(
-									self.log.error, log_func_last=self.log.exception,
-									lines=[ 'Unexpected error during trip check [BUG]',
-										('  trip: {}', trip), ('  error: [{}] {}', err_type, err) ])
-							err_api, err_type, err = 'core', 'bug', None
+						for err in err_batch.exc_list:
+							err_diff, skip_api = self._handle_api_test_failure(trip, err, log=log_trip)
+							if err_diff:
+								err, err_api, err_type = err_diff
+								trip_date_diffs.append(f'{err_api}.{err_type}')
+								self.stats[f'diff-api-{err_api}'] += 1
+								self.stats[f'diff-type-{err_type}'] += 1
+								if err:
+									err_info = [
+										('API [{}] data mismatch for gtfs trip: {}', err_api, err_type),
+										('Trip: {}', trip), ('Date/time: {}', ts_src) ]
+									if err.diff or err.data:
+										err_info.append('Diff details:')
+										err_info.extend(textwrap.indent(
+											err.diff or pformat_data(err.data), '  ' ).splitlines())
+									log_lines(self.log_diffs.error, err_info)
+							if skip_api:
+								api_list = list(filter(lambda api: api.api_tag != skip_api, api_list))
 
-						else: err_api = err.api
+						# Retry with other embark delay values until something is matched
+						if set(trip_date_diffs) == {'serw.GWCTestFailNoJourney'}: continue
 
-						trip_date_diffs.append(f'{err_api}.{err_type}')
-						self.stats[f'diff-api-{err_api}'] += 1
-						self.stats[f'diff-type-{err_type}'] += 1
-						if err:
-							err_info = [
-								('API [{}] data mismatch for gtfs trip: {}', err_api, err_type),
-								('Trip: {}', trip), ('Date/time: {}', ts_src) ]
-							if err.diff or err.data:
-								err_info.append('Diff details:')
-								err_info.extend(textwrap.indent(
-									err.diff or pformat_data(err.data), '  ' ).splitlines())
-							log_lines(self.log_diffs.error, err_info)
-
-					trip_diffs.extend(trip_date_diffs)
-					log_trip.debug( '[{}] result: {}', date,
-						', '.join(trip_date_diffs) if trip_date_diffs else f'skip (trip={trip_skip})' )
-				if trip_skip: break
+						trip_diffs.extend(trip_date_diffs)
+						log_trip.debug( '[{}] result: {}', date,
+							', '.join(trip_date_diffs) if trip_date_diffs
+								else f'skip (trip={not bool(api_list)})' )
+						break
 			self.stats['diff-total'] += len(trip_diffs)
 
 			if self.trip_log:
-				if trip_skip: trip_res = '-skip-'
+				if not api_list: trip_res = '-skip-'
 				else: trip_res = '-match-' if not trip_diffs else ':'.join(sorted(set(trip_diffs)))
 				self.trip_log_update(t, trip_res)
 
