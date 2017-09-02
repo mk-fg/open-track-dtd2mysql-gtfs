@@ -4,8 +4,8 @@ import itertools as it, operator as op, functools as ft
 import datetime as dt
 import os, sys, pathlib, signal, locale, warnings
 import contextlib, inspect, collections, enum, time
-import asyncio, urllib.parse, json, re, base64
-import random, secrets, bisect, hashlib
+import asyncio, urllib.parse, json, re
+import random, base64, binascii, secrets, bisect, hashlib
 import textwrap, pprint, logging, logging.handlers
 
 import aiohttp # http://aiohttp.readthedocs.io
@@ -327,6 +327,8 @@ err_cls = lambda err: err.__class__.__name__
 json_pretty = dict(sort_keys=True, indent=2, separators=(',', ': '))
 pformat_data = lambda data: pprint.pformat(data, indent=2, width=100)
 re_type = type(re.compile(''))
+obj_b64id = lambda obj: \
+	base64.urlsafe_b64encode(binascii.a2b_hex(f'{id(obj):x}')).decode().rstrip('=')
 
 def die(): raise RuntimeError
 
@@ -531,7 +533,9 @@ class GWCTrip:
 			it.groupby(train_uid.rstrip('*') for train_uid in sig.train_uid_list) ))
 		if train_uid_list[0] == train_uid_list[-1]:
 			train_uid = train_uid_list[0]
-			if sig.train_uid: assert train_uid == sig.train_uid, [train_uid, sig.train_uid]
+			## It is common that api has one trainUid in journey
+			##  description but different one in calling points, using only latter one.
+			# if sig.train_uid: assert train_uid == sig.train_uid, [train_uid, sig.train_uid]
 		else: train_uid = '{}_{}'.format(train_uid_list[0], train_uid_list[-1])
 		return cls(train_uid, trip_stops, sig.ts_src, sig_train_uid_list=sig.train_uid_list)
 
@@ -648,7 +652,7 @@ class GWCJnSig:
 class GWCJn:
 
 	@classmethod
-	def from_serw_cps(cls, jn_sig, cps):
+	def from_serw_cps(cls, jn_sig, cps, **meta):
 		if isinstance(jn_sig, str): jn_sig = GWCJnSig.from_serw_url(jn_sig)
 
 		trip_order = list()
@@ -674,16 +678,16 @@ class GWCJn:
 		trips = list(
 			GWCTrip.from_serw_cps(sig, cps['result'][sig_key], cps['links'])
 			for n, sig_key, sig in trip_order )
-		return cls(trips, jn_sig.ts_start, jn_sig.ts_end)
+		return cls(trips, jn_sig.ts_start, jn_sig.ts_end, **meta)
 
-	def __init__(self, trips, ts_start, ts_end):
-		self.trips, self.ts_start, self.ts_end = trips, ts_start, ts_end
+	def __init__(self, trips, ts_start, ts_end, **meta):
+		self.trips, self.ts_start, self.ts_end, self.meta = trips, ts_start, ts_end, meta
 
 	def __repr__(self):
 		trips = ' - '.join(( f'{t.train_uid}'
 			f'({t.ts_start.strftime("%H:%M")}+{len(t.stops)})' ) for t in self.trips)
 		span = ' '.join(ts.strftime("%H:%M") for ts in [self.ts_start, self.ts_end])
-		return f'<Jn [{span}] [{trips}]>'
+		return f'<Jn {obj_b64id(self)} [{span}] [{trips}]>'
 
 
 class GWCAPISerw:
@@ -740,6 +744,24 @@ class GWCAPISerw:
 					('cmd: {}', cmd), ('  trip-gtfs: {}', gtfs_trip), ('  trip-api: {}', jn_trip) ])
 				return
 			return f'Matching journey trip [ gtfs -vs- api ]:\n  {jn_trip}\n{res.stdout.decode()}'
+
+	def format_journey_diff(self, jns):
+		if not jns: diff = 'No journeys returned'
+		else:
+			diff, quirks = ['Found non-matching journeys:'], dict()
+			for jn in jns:
+				diff.append(f'  {jn}')
+				for quirk in jn.meta.get('quirks') or list():
+					try:
+						quirk = quirks.get(quirk['id'], quirk)
+						quirks[quirk['id']] = quirk
+						quirk.setdefault('journeys', list()).append(obj_b64id(jn))
+					except: quirks['raw-' + secrets.token_urlsafe(3)] = quirk
+			if quirks:
+				diff.append('Associated bulletins:')
+				diff.extend(textwrap.indent(pformat_data(list(quirks.values())), '  ').splitlines())
+			diff = '\n'.join(diff + [''])
+		return diff
 
 
 	def _api_cache(self, fn_tpl=None, data=..., fn=None):
@@ -878,7 +900,7 @@ class GWCAPISerw:
 			jn_sig = GWCJnSig.from_serw_info(jn_info, jp_res['links'])
 			# jn_sig = GWCJnSig.from_serw_url(
 			# 	urllib.parse.unquote_plus(jn_sig_str).rsplit('/', 1)[-1] )
-			journeys.append(GWCJn.from_serw_cps(jn_sig, cps))
+			journeys.append(GWCJn.from_serw_cps(jn_sig, cps, quirks=jn_info.get('bulletins')))
 
 		return journeys
 
@@ -939,7 +961,7 @@ class GWCAPISerw:
 				jn_trip.train_uid += 'x'
 				continue
 			break
-		else: raise GWCTestFailNoJourney(self.api_tag, trip, jns)
+		else: raise GWCTestFailNoJourney(self.api_tag, trip, jns, diff=self.format_journey_diff(jns))
 		if trip.train_uid not in jns_dict:
 			self.log.debug('Matched assoc train_uid ({}) by component: {}', trip.train_uid, train_uid)
 
