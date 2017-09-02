@@ -1227,7 +1227,7 @@ class GWCTestRunner:
 		return self.pick_dates(dates, weights=dict(bank_holiday=1))
 
 
-	async def _run_trip_tests(self, trip, time0, dates, log=None):
+	async def _run_trip_tests(self, trip, time0, dates, log=None, jn_info=False):
 		if not log: log = self.log
 		self.stats['trip-check'] += 1
 		trip_diffs, api_list = list(), list(self.api_list)
@@ -1253,14 +1253,24 @@ class GWCTestRunner:
 							self.stats[f'diff-api-{err_api}'] += 1
 							self.stats[f'diff-type-{err_type}'] += 1
 							if err:
-								err_info = [
-									('API [{}] data mismatch for gtfs trip: {}', err_api, err_type),
-									('Trip: {}', trip), ('Date/time: {}', ts_src) ]
-								if err.diff or err.data:
-									err_info.append('Diff details:')
-									err_info.extend(textwrap.indent(
-										err.diff or pformat_data(err.data), '  ' ).splitlines())
-								log_lines(self.log_diffs.error, err_info)
+								if err_type == 'GWCTestFailNoJourney' and jn_info:
+									jns, jn_info = err.data, list()
+									jn_info.append(f'Returned journeys ({len(jns)}):')
+									for jn in err.data:
+										jn_info.append(f' - {jn}')
+										for trip in jn.trips:
+											jn_info.append(f'   - {trip}')
+											for stop in trip.stops: jn_info.append(f'     - {stop}')
+									log_lines(self.log_diffs.info, jn_info)
+								else:
+									err_info = [
+										('API [{}] data mismatch for gtfs trip: {}', err_api, err_type),
+										('Trip: {}', trip), ('Date/time: {}', ts_src) ]
+									if err.diff or err.data:
+										err_info.append('Diff details:')
+										err_info.extend(textwrap.indent(
+											err.diff or pformat_data(err.data), '  ' ).splitlines())
+									log_lines(self.log_diffs.error, err_info)
 						if skip_api:
 							api_list = list(filter(lambda api: api.api_tag != skip_api, api_list))
 
@@ -1317,7 +1327,7 @@ class GWCTestRunner:
 		src, dst, time0 = self.conf.test_direct
 		trip = GWCTrip('xxx', [GWCTripStop(src, time0), GWCTripStop(dst, time0)])
 		dates = self.conf.test_pick_date_set
-		trip_diffs = await self._run_trip_tests(trip, time0, dates)
+		trip_diffs = await self._run_trip_tests(trip, time0, dates, jn_info=True)
 
 	async def _run_pick_trips(self):
 		pick_funcs = pick_funcs_base = 'pick_trips', 'pick_dates'
