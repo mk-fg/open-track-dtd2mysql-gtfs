@@ -21,6 +21,9 @@
 # test_train_uids: 50
 # test_train_uids: [C74096_C74099]
 
+## test_direct: tuple of (src, dst, time) to query instead of any actual trips, dump journeys.
+# test_direct = [SOU, POO, '19:54']
+
 ## test_trip_log: path to file to append tested trip_id's to and skip ones already there.
 # test_trip_log: trips-done.log
 

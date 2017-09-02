@@ -33,6 +33,9 @@ class TestConfig:
 	## test_train_uids: either integer to pick n random train_uids or list of specific uids to use.
 	test_train_uids = None
 
+	## test_direct: tuple of (src, dst, time) to query instead of any actual trips, dump journeys.
+	test_direct = None
+
 	## test_trip_log: path to file to append tested trip_id's to and skip ones already there.
 	test_trip_log = None
 
@@ -452,8 +455,8 @@ GTFSExceptionType = enum.IntEnum('ExceptionType', 'added removed')
 def dts_to_dt(dts, date=None):
 	dts0 = dts
 	if isinstance(dts, dt.timedelta): dts = dts.total_seconds()
-	if isinstance(dts, dt.datetime):
-		dts = dts.time()
+	if isinstance(dts, dt.datetime): dts = dts.time()
+	if isinstance(dts, dt.time):
 		dts = dts.hour * 3600 + dts.minute * 60 + dts.second
 	dts = int(dts)
 	days, hours = divmod(dts // 3600, 24)
@@ -493,7 +496,7 @@ GWCTestResult = collections.namedtuple('GWCTestResult', 'success exc')
 
 class GWCTripStop:
 
-	def __init__(self, crs, ts, pickup, dropoff, **meta):
+	def __init__(self, crs, ts, pickup=0, dropoff=0, **meta):
 		pickup, dropoff = map(GTFSEmbarkType, [pickup, dropoff])
 		self.crs, self.ts, self.pickup, self.dropoff, self.meta = crs, ts, pickup, dropoff, meta
 
@@ -1307,7 +1310,16 @@ class GWCTestRunner:
 	async def run(self):
 		self.stats = collections.Counter()
 		self.stats['diff-total'] = 0
+		if self.conf.test_direct: await self._run_direct()
+		else: await self._run_pick_trips()
 
+	async def _run_direct(self):
+		src, dst, time0 = self.conf.test_direct
+		trip = GWCTrip('xxx', [GWCTripStop(src, time0), GWCTripStop(dst, time0)])
+		dates = self.conf.test_pick_date_set
+		trip_diffs = await self._run_trip_tests(trip, time0, dates)
+
+	async def _run_pick_trips(self):
 		pick_funcs = pick_funcs_base = 'pick_trips', 'pick_dates'
 		if self.conf.test_pick_special:
 			pick_funcs = (f'{v}_{self.conf.test_pick_special}' for v in pick_funcs)
@@ -1445,6 +1457,10 @@ def main(args=None, conf=None):
 	group.add_argument('-t', '--test-date', metavar='date-list',
 		help='Only test specified dates (iso8601 format), skipping'
 			' trips that dont run on them. Multiple values are split by spaces.')
+	group.add_argument('-r', '--test-src-dst-time', metavar='src-dst-time',
+		help='Query and list journeys between any two stops starting at specified time.'
+			' Argument must be two hypen-separated crs codes and HH:MM time.'
+			' -t/--test-date is used as a trip date in the query. Example: SOU-POO-19:54')
 	group.add_argument('--test-special',
 		metavar='name', choices=conf.test_pick_special_iters,
 		help='Use special named trip/date selection iterators. Choices: %(choices)s')
@@ -1559,7 +1575,13 @@ def main(args=None, conf=None):
 		read_default_file=mycnf_path, read_default_group=opts.mycnf_group ).items()))
 	if opts.gtfs_db_name: conf.mysql_db_name = opts.gtfs_db_name
 
-	if opts.test_train_uid:
+	if opts.test_src_dst_time:
+		if not opts.test_date:
+			parser.error('-t/--test-date option is required with -r/--test-src-dst-time')
+		src, dst, dts = opts.test_src_dst_time.split('-')
+		hh, mm = map(int, dts.split(':'))
+		conf.test_direct = src.upper(), dst.upper(), dts_to_dt(hh*3600+mm*60)
+	elif opts.test_train_uid:
 		conf.test_train_uids = opts.test_train_uid.split()
 		if opts.test_train_limit:
 			conf.test_train_uids = conf.test_train_uids[:opts.test_train_limit]
