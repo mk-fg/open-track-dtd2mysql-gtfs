@@ -713,8 +713,14 @@ class GTFSDB:
 					print(f'{pre}      {stop_id} {ts_arr or "-":^3s} {ts_dep or "-":^3s} {p}{d}')
 
 
-	def print_stop_info(self, crs, db_cif):
-		print(f'Station: {crs}')
+	def print_stop_info(self, stop_id, db_cif):
+		crs = tiploc = stop_id
+		if len(stop_id) == 3:
+			(tiploc,), = self.q(f'SELECT tiploc_code FROM {db_cif}.tiploc WHERE crs_code = %s', crs)
+		elif len(stop_id) == 7:
+			(crs,), = self.q(f'SELECT crs_code FROM {db_cif}.tiploc WHERE tiploc_code = %s', tiploc)
+		else: raise ValueError(f'Unrecognized stop code format: {stop_id!r}')
+		print(f'Station: {crs} / {tiploc}')
 		seen = dict()
 		for s in self.q(f'''
 				SELECT *
@@ -800,8 +806,8 @@ def main(args=None):
 		help='Single train_uid to query/show information for.')
 	cmd.add_argument('-t', '--trip-id', metavar='id',
 		help='GTFS trip_id value to print info for.')
-	cmd.add_argument('-s', '--stop-crs', metavar='crs-code',
-		help='Show info for specified 3-letter stop CRS code from CIF data.')
+	cmd.add_argument('-s', '--stop-id', metavar='crs-or-tiploc',
+		help='Show info for either 3-letter stop CRS code or 7-letter tiploc from CIF data.')
 
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -842,8 +848,8 @@ def main(args=None):
 				if not opts.db_gtfs:
 					parser.error('--db-gtfs must be specified for --trip-id info.')
 				db.print_train_info(trip_id=opts.trip_id, db_gtfs=opts.db_gtfs)
-			if opts.stop_crs:
-				db.print_stop_info(opts.stop_crs, opts.db_cif)
+			if opts.stop_id:
+				db.print_stop_info(opts.stop_id, opts.db_cif)
 
 		else: parser.error(f'Action not implemented: {opts.call}')
 
