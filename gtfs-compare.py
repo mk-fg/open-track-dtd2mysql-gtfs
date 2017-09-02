@@ -618,10 +618,11 @@ class GTFSDB:
 					-- , public_arrival_time AS ts_arr, public_departure_time AS ts_dep, activity
 				FROM {db_cif}.{z}schedule s
 				-- LEFT JOIN {db_cif}.{z}stop_time st ON st.{z}schedule = s.id
-				{f'-- LEFT JOIN {db_cif}.tiploc t ON t.tiploc_code = st.location' if not z else ''}
+				{(f'-- LEFT JOIN {db_cif}.physical_station'
+					' ps ON ps.tiploc_code = st.location') if not z else ''}
 				WHERE
 					train_uid IN ({train_uid_tuple})
-					{'-- AND (st.id IS NULL OR t.crs_code IS NOT NULL)' if not z else ''}
+					{'-- AND (st.id IS NULL OR ps.crs_code IS NOT NULL)' if not z else ''}
 				ORDER BY
 					s.train_uid, -- FIELD(stp_indicator,'P','O','N','C'),
 					s.id -- , st.id'''
