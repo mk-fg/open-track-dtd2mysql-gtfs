@@ -714,13 +714,24 @@ class GTFSDB:
 
 
 	def print_stop_info(self, stop_id, db_cif):
-		crs = tiploc = stop_id
-		if len(stop_id) == 3:
-			(tiploc,), = self.q(f'SELECT tiploc_code FROM {db_cif}.tiploc WHERE crs_code = %s', crs)
-		elif len(stop_id) == 7:
-			(crs,), = self.q(f'SELECT crs_code FROM {db_cif}.tiploc WHERE tiploc_code = %s', tiploc)
+		# crs = tiploc = stop_id
+		codes, tiploc_note = dict(crs=stop_id, tiploc=stop_id), ''
+		if len(stop_id) == 3: query, res = 'crs', 'tiploc'
+		elif len(stop_id) == 7: query, res = 'tiploc', 'crs'
 		else: raise ValueError(f'Unrecognized stop code format: {stop_id!r}')
-		print(f'Station: {crs} / {tiploc}')
+		(code,), = self.q(f'''
+			SELECT {res}_code
+			FROM {db_cif}.tiploc
+			WHERE {query}_code = %s''', codes[query])
+		if not code:
+			(code,), = self.q(f'''
+				SELECT {res}_code
+				FROM {db_cif}.physical_station
+				WHERE {query}_code = %s''', codes[query])
+			tiploc_note = ' [missing in tiploc table]'
+		codes[res] = code
+		crs, tiploc = codes['crs'], codes['tiploc']
+		print(f'Station: {crs} / {tiploc}{tiploc_note}')
 		seen = dict()
 		for s in self.q(f'''
 				SELECT *
