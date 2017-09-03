@@ -1132,7 +1132,9 @@ class GWCTestRunner:
 
 	async def _pick_trips(self, weights=None, pick_uids=None):
 		weights = filter_weights_dict(weights or self.conf.test_pick_trip, seq=1)
-		pick_trip_order = 'RAND()' if self.conf.test_pick_trip_random_order else 'trip_id'
+		pick_trip_order = ( 'trip_id'
+			if self.conf.test_pick_trip_random_order
+			else f'RAND({random.randint(0, 2**63)})' )
 
 		trip_id_skip = ( '1' if not self.trip_skip else
 			f'trip_id NOT IN ({",".join(map(self.escape, self.trip_skip))})' )
@@ -1630,8 +1632,12 @@ def main(args=None, conf=None):
 		conf.debug_cache_dir = pathlib.Path(opts.debug_cache_dir)
 		conf.debug_cache_dir.mkdir(parents=True, exist_ok=True)
 	if opts.debug_trigger_mismatch: conf.debug_trigger_mismatch = opts.debug_trigger_mismatch
-	if opts.debug_rng_seed: random.seed(opts.debug_rng_seed)
 	if opts.debug_print_journeys: conf.debug_print_journeys = True
+
+	seed = opts.debug_rng_seed
+	if not seed: seed = os.urandom(12)
+	log.debug('Using RNG seed: {}', base64.urlsafe_b64encode(seed).decode())
+	random.seed(seed)
 
 	log.debug('Starting run_tests loop...')
 	with contextlib.closing(asyncio.get_event_loop()) as loop:
