@@ -45,6 +45,7 @@ class TestConfig:
 	#  can make journey planner discard relevant result for too common routes.
 	test_trip_embark_delay = 5*60
 	# test_trip_embark_delay = [5*60, 10*60, 30*60]
+	test_trip_dep_delay = 60*60 # offset for query rangeEnd time from stop dep time
 
 	# XXX: negative tests - specifically pick bank holidays and exception days
 	test_trip_dates = 3 # how many dates to pick and test per trip (using test_pick_date weights)
@@ -873,7 +874,7 @@ class GWCAPISerw:
 			Default ts_dep range if only one datetime is specified is (ts_dep, ts_dep+3h).
 			Returns None if this query cannot be performed, e.g. due to missing src/dst in API.'''
 
-		# Default is to use current time as ts_start and +3h as ts_end
+		# Default is to use current time as ts_start and +test_trip_dep_delay as ts_end
 		if not ts_dep:
 			ts = dt.datetime.utcnow()
 			if ( (ts.month > 3 or ts.month < 10) # "mostly correct" (tm) DST hack for BST
@@ -882,7 +883,7 @@ class GWCAPISerw:
 				ts += dt.timedelta(seconds=3600)
 			ts_dep = ts
 		if not isinstance(ts_dep, tuple):
-			ts_dep = ts_dep, ts_dep + dt.timedelta(seconds=3*3600)
+			ts_dep = ts_dep, ts_dep + dt.timedelta(seconds=self.conf.test_trip_dep_delay)
 		ts_start, ts_end = (( ts if isinstance(ts, str)
 			else ts.strftime('%Y-%m-%dT%H:%M:%S') ) for ts in ts_dep )
 
@@ -914,6 +915,7 @@ class GWCAPISerw:
 	async def test_trip(self, trip):
 		fail = self.conf.debug_trigger_mismatch
 		fail = fail.lower().split() if fail else list()
+		ts_dep_range = trip.ts_start, trip.ts_end + dt.timedelta(seconds=self.conf.test_trip_dep_delay)
 
 		async with self.rate_sem:
 			# Try fast query without checking whether stops are valid for API
@@ -923,9 +925,7 @@ class GWCAPISerw:
 				dst_nlc = await self.get_station(dst, self.st_type.dst)
 				if src_nlc == dst_nlc: raise GWCError
 			except GWCError as err: jns = None
-			else:
-				jns = await self.get_journeys(
-					src_nlc, dst_nlc, ts_dep=(trip.ts_start, trip.ts_end) )
+			else: jns = await self.get_journeys(src_nlc, dst_nlc, ts_dep=ts_dep_range)
 
 			if jns is None:
 				# Slower query, picking valid stops first, then looking for journeys again
@@ -948,7 +948,7 @@ class GWCAPISerw:
 				if (src, dst) != (src0, dst0):
 					self.log.warning( 'Limiting check to [{} {}]'
 						' segment due to api limitations for trip: {}', src, dst, trip )
-				jns = await self.get_journeys(src_nlc, dst_nlc, ts_dep=(trip.ts_start, trip.ts_end))
+				jns = await self.get_journeys(src_nlc, dst_nlc, ts_dep=ts_dep_range)
 
 		if jns is None: raise GWCTestSkipTrip(self.api_tag, 'api lookup fails')
 		log_lines(self.log.debug, [

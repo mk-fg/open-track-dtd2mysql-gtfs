@@ -32,6 +32,7 @@
 # Single small value can yield no resulst, while too large ones
 #  can make journey planner discard relevant result for too common routes.
 # test_trip_embark_delay: [300, 600, 1800]
+# test_trip_dep_delay: 1800 # offset for query rangeEnd time from stop dep time
 
 ## Misc testing parameters
 # test_trip_dates: 3 # how many dates to pick and test per trip (using test_pick_date weights)
