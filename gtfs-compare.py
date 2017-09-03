@@ -175,7 +175,7 @@ GTFSEmbarkType = enum.IntEnum('EmbarkType', 'regular none phone driver', start=0
 def embark_format(t, v, reg_short=None):
 	if reg_short and v == GTFSEmbarkType.regular: v = reg_short
 	elif v == GTFSEmbarkType.none: v = '-'
-	else: v = f'[{t}={p.name}]'
+	else: v = f'[{t}={v.name}]'
 	return v
 
 cif_train_status = {
