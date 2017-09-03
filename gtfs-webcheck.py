@@ -748,10 +748,10 @@ class GWCAPISerw:
 				return
 			return f'Matching journey trip [ gtfs -vs- api ]:\n  {jn_trip}\n{res.stdout.decode()}'
 
-	def format_journey_diff(self, jns):
+	def format_journey_diff(self, jns, err_info='Found non-matching journeys'):
 		if not jns: diff = 'No journeys returned'
 		else:
-			diff, quirks = ['Found non-matching journeys:'], dict()
+			diff, quirks = [f'{err_info}:'], dict()
 			for jn in jns:
 				diff.append(f'  {jn}')
 				for quirk in jn.meta.get('quirks') or list():
@@ -956,16 +956,23 @@ class GWCAPISerw:
 			*textwrap.indent(pformat_data(jns), '  ').splitlines() ])
 
 		## Find one-direct-trip journey with matching train_uid
-		# Failing that, try to get trip with associated train, as that's the one with changed schedule
+		# Failing that, try to get trip with one of the trains of the association
 		jns_dict = dict((jn.trips[0].train_uid, jn) for jn in jns if len(jn.trips) == 1)
-		for train_uid in trip.train_uid, trip.train_uid.split('_')[-1]:
+		train_uid_match = None
+		for train_uid in [trip.train_uid, *trip.train_uid.split('_')]:
 			if train_uid not in jns_dict: continue
 			jn_trip = jns_dict[train_uid].trips[0]
 			if 'nojourney' in fail:
 				jn_trip.train_uid += 'x'
 				continue
-			break
-		else: raise GWCTestFailNoJourney(self.api_tag, trip, jns, diff=self.format_journey_diff(jns))
+			if train_uid_match:
+				raise GWCTestFailNoJourney( self.api_tag, trip, jns,
+					diff=self.format_journey_diff(jns, err_info='**Multiple** matching journeys') )
+			train_uid_match = train_uid
+			if train_uid == trip.train_uid: break # perfect match, no need to lookup parts
+		if not train_uid_match:
+			raise GWCTestFailNoJourney(self.api_tag, trip, jns, diff=self.format_journey_diff(jns))
+		else: train_uid = train_uid_match
 		if trip.train_uid not in jns_dict:
 			self.log.debug('Matched assoc train_uid ({}) by component: {}', trip.train_uid, train_uid)
 
