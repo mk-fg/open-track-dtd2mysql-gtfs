@@ -66,6 +66,7 @@
 # serw_api_debug: false
 
 ## debug_*: misc debug options - see corresponding command line parameters.
-# debug_http_dir:
-# debug_cache_dir:
-# debug_trigger_mismatch:
+# debug_http_dir: path/to/somedir
+# debug_cache_dir: path/to/somedir
+# debug_trigger_mismatch: StopMismatch
+# debug_print_journeys: true

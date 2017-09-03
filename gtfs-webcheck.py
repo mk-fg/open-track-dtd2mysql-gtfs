@@ -95,6 +95,7 @@ class TestConfig:
 	debug_http_dir = None
 	debug_cache_dir = None
 	debug_trigger_mismatch = None
+	debug_print_journeys = False
 
 	def __init__(self, path=None):
 		if path: self._update_from_file(path)
@@ -966,12 +967,12 @@ class GWCAPISerw:
 				jn_trip.train_uid += 'x'
 				continue
 			if train_uid_match:
-				raise GWCTestFailNoJourney( self.api_tag, trip, jns,
+				raise GWCTestFailNoJourney( self.api_tag, trip, [jns],
 					diff=self.format_journey_diff(jns, err_info='**Multiple** matching journeys') )
 			train_uid_match = train_uid
 			if train_uid == trip.train_uid: break # perfect match, no need to lookup parts
 		if not train_uid_match:
-			raise GWCTestFailNoJourney(self.api_tag, trip, jns, diff=self.format_journey_diff(jns))
+			raise GWCTestFailNoJourney(self.api_tag, trip, [jns], diff=self.format_journey_diff(jns))
 		else: train_uid = train_uid_match
 		if trip.train_uid not in jns_dict:
 			self.log.debug('Matched assoc train_uid ({}) by component: {}', trip.train_uid, train_uid)
@@ -987,18 +988,21 @@ class GWCAPISerw:
 				if st1.crs == st2.crs: break
 				if st2.ts:
 					raise GWCTestFailStopNotFound(
-						self.api_tag, trip, [jn_trip, st2], diff=self.format_trip_diff(trip, jn_trip) )
+						self.api_tag, trip, [jns, jn_trip, st2], diff=self.format_trip_diff(trip, jn_trip) )
 			else:
 				raise GWCTestFailStopNotFound(
-					self.api_tag, trip, [jn_trip, st1], diff=self.format_trip_diff(trip, jn_trip) )
+					self.api_tag, trip, [jns, jn_trip, st1], diff=self.format_trip_diff(trip, jn_trip) )
 			if n == mismatch_n and 'stopmismatch' in fail:
 				st1.ts = st2.ts + dt.timedelta(seconds=self.conf.test_trip_time_slack + 5*60)
 			ts1, ts2 = ((0 if not st.ts else st.ts.total_seconds()) for st in [st1, st2])
 			ts_diff = abs(ts1 - ts2)
 			if ts_diff > self.conf.test_trip_time_slack:
-				raise GWCTestFailStopMismatch( self.api_tag, trip,
-					diff=self.format_trip_diff(trip, jn_trip),
-					data=[jn_trip, st1.crs, (st1.ts, st2.ts), (ts_diff, self.conf.test_trip_time_slack)] )
+				raise GWCTestFailStopMismatch(
+					self.api_tag, trip,
+					data=[
+						jns, jn_trip, st1.crs, (st1.ts, st2.ts),
+						(ts_diff, self.conf.test_trip_time_slack) ],
+					diff=self.format_trip_diff(trip, jn_trip) )
 			if st1.crs == dst: break
 
 
@@ -1234,7 +1238,8 @@ class GWCTestRunner:
 		return self.pick_dates(dates, weights=dict(bank_holiday=1))
 
 
-	async def _run_trip_tests(self, trip, time0, dates, log=None, jn_info=False):
+	async def _run_trip_tests( self, trip, time0, dates,
+			log=None, log_err_info=True, log_jn_info=False ):
 		if not log: log = self.log
 		self.stats['trip-check'] += 1
 		trip_diffs, api_list = list(), list(self.api_list)
@@ -1260,16 +1265,16 @@ class GWCTestRunner:
 							self.stats[f'diff-api-{err_api}'] += 1
 							self.stats[f'diff-type-{err_type}'] += 1
 							if err:
-								if err_type == 'GWCTestFailNoJourney' and jn_info:
-									jns, jn_info = err.data, list()
+								if log_jn_info:
+									jns, jn_info = err.data[0], list()
 									jn_info.append(f'Returned journeys ({len(jns)}):')
-									for jn in err.data:
+									for jn in jns:
 										jn_info.append(f' - {jn}')
 										for trip in jn.trips:
 											jn_info.append(f'   - {trip}')
 											for stop in trip.stops: jn_info.append(f'     - {stop}')
 									log_lines(self.log_diffs.info, jn_info)
-								else:
+								if log_err_info:
 									err_info = [
 										('API [{}] data mismatch for gtfs trip: {}', err_api, err_type),
 										('Trip: {}', trip), ('Date/time: {}', ts_src) ]
@@ -1334,7 +1339,8 @@ class GWCTestRunner:
 		src, dst, time0 = self.conf.test_direct
 		trip = GWCTrip('xxx', [GWCTripStop(src, time0), GWCTripStop(dst, time0)])
 		dates = self.conf.test_pick_date_set
-		trip_diffs = await self._run_trip_tests(trip, time0, dates, jn_info=True)
+		trip_diffs = await self._run_trip_tests(
+			trip, time0, dates, log_err_info=False, log_jn_info=True )
 
 	async def _run_pick_trips(self):
 		pick_funcs = pick_funcs_base = 'pick_trips', 'pick_dates'
@@ -1411,7 +1417,8 @@ class GWCTestRunner:
 				continue
 
 			# Check produced trip info against API(s)
-			trip_diffs = await self._run_trip_tests(trip, time0, dates, log=log_trip)
+			trip_diffs = await self._run_trip_tests(
+				trip, time0, dates, log=log_trip, log_jn_info=self.conf.debug_print_journeys )
 
 			if self.trip_log:
 				if trip_diffs is None: trip_res = '-skip-'
@@ -1478,6 +1485,9 @@ def main(args=None, conf=None):
 		help='Query and list journeys between any two stops starting at specified time.'
 			' Argument must be two hypen-separated crs codes and HH:MM time.'
 			' -t/--test-date is used as a trip date in the query. Example: SOU-POO-19:54')
+	group.add_argument('--test-skip-stops', metavar='N[-M]',
+		help='When checking trip, skip some number (N[-M] format) of first/last stops.'
+			' Can be used in combination with -u/-t to check if some segment of trip can be matched.')
 	group.add_argument('--test-special',
 		metavar='name', choices=conf.test_pick_special_iters,
 		help='Use special named trip/date selection iterators. Choices: %(choices)s')
@@ -1520,9 +1530,8 @@ def main(args=None, conf=None):
 			' Supported types correspond to implemented GWCTestFail'
 				' exceptions, e.g.: NoJourney, StopNotFound, StopMismatch.'
 			' Multiple values can be specified in one space-separated arg.')
-	group.add_argument('--debug-skip-stops', metavar='N[-M]',
-		help='When checking trip, skip some number (N[-M] format) of first/last stops.'
-			' Can be used in combination with -u/-t to check if some segment of trip can be matched.')
+	group.add_argument('--debug-print-journeys', action='store_true',
+		help='Log returned journeys alongside any other diffs.')
 	group.add_argument('--debug-rng-seed',
 		metavar='any-string', help='Random number generator seed.')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
@@ -1609,6 +1618,10 @@ def main(args=None, conf=None):
 	if opts.test_date:
 		conf.test_pick_date_set = set(
 			dt.date(*map(int, d.split('-', 2))) for d in opts.test_date.split() )
+	if opts.test_skip_stops:
+		nm = list(map(int, opts.test_skip_stops.split('-', 1)))
+		if len(nm) == 1: nm.append(0)
+		conf.test_skip_stops = tuple(nm)
 
 	if opts.debug_http_dir:
 		conf.debug_http_dir = pathlib.Path(opts.debug_http_dir)
@@ -1618,10 +1631,7 @@ def main(args=None, conf=None):
 		conf.debug_cache_dir.mkdir(parents=True, exist_ok=True)
 	if opts.debug_trigger_mismatch: conf.debug_trigger_mismatch = opts.debug_trigger_mismatch
 	if opts.debug_rng_seed: random.seed(opts.debug_rng_seed)
-	if opts.debug_skip_stops:
-		nm = list(map(int, opts.debug_skip_stops.split('-', 1)))
-		if len(nm) == 1: nm.append(0)
-		conf.test_skip_stops = tuple(nm)
+	if opts.debug_print_journeys: conf.debug_print_journeys = True
 
 	log.debug('Starting run_tests loop...')
 	with contextlib.closing(asyncio.get_event_loop()) as loop:
