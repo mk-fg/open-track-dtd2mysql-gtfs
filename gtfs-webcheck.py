@@ -1272,9 +1272,9 @@ class GWCTestRunner:
 									jn_info.append(f'Returned journeys ({len(jns)}):')
 									for jn in jns:
 										jn_info.append(f' - {jn}')
-										for trip in jn.trips:
-											jn_info.append(f'   - {trip}')
-											for stop in trip.stops: jn_info.append(f'     - {stop}')
+										for jn_trip in jn.trips:
+											jn_info.append(f'   - {jn_trip}')
+											for stop in jn_trip.stops: jn_info.append(f'     - {stop}')
 									log_lines(self.log_diffs.info, jn_info)
 								if log_err_info:
 									err_info = [
