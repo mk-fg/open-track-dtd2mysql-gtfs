@@ -868,21 +868,12 @@ class GWCAPISerw:
 		self.conf.serw_crs_nlc_map[code_raw] = code # to cache/update resolved codes
 		return code
 
-	async def get_journeys(self, src, dst, ts_dep=None):
+	async def get_journeys(self, src, dst, ts_dep):
 		'''Query API and return a list of journeys from src to dst,
-				starting at ts_dep UTC/BST datetime (without timezone, default: now) or later.
+				starting at ts_dep datetime (without timezone) or later.
 			ts_dep can be either datetime or tuple to specify departure date/time range.
 			Default ts_dep range if only one datetime is specified is (ts_dep, ts_dep+3h).
 			Returns None if this query cannot be performed, e.g. due to missing src/dst in API.'''
-
-		# Default is to use current time as ts_start and +test_trip_dep_delay as ts_end
-		if not ts_dep:
-			ts = dt.datetime.utcnow()
-			if ( (ts.month > 3 or ts.month < 10) # "mostly correct" (tm) DST hack for BST
-					or (ts.month == 3 and ts.day >= 27)
-					or (ts.month == 10 and ts_start.day <= 27) ):
-				ts += dt.timedelta(seconds=3600)
-			ts_dep = ts
 		if not isinstance(ts_dep, tuple):
 			ts_dep = ts_dep, ts_dep + dt.timedelta(seconds=self.conf.test_trip_dep_delay)
 		ts_start, ts_end = (( ts if isinstance(ts, str)
